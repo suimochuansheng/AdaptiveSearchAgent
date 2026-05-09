@@ -35,3 +35,9 @@ env/
 
 # 环境变量
 .env
+
+# AI 工具配置（含 API Key）
+.deepcode/
+
+# 临时测试脚本
+test_skills.py
