@@ -38,6 +38,7 @@ env/
 
 # AI 工具配置（含 API Key）
 .deepcode/
+.claude/
 
 # 临时测试脚本
 test_skills.py
