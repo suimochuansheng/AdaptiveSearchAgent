@@ -12,7 +12,12 @@ from src.utils.json_parser import robust_json_parse
 
 # 初始化 Ollama 本地 LLM 实例
 # temperature=0 确保每次输出稳定可复现，适合关键词提取任务
-llm = ChatOllama(model=settings.ollama_model, temperature=0)
+llm = ChatOllama(
+    model=settings.OLLAMA_MODEL_NAME,
+    base_url=settings.OLLAMA_BASE_URL,
+    temperature=0,
+    # api_key=settings.OLLAMA_API_KEY,
+)
 
 
 async def planner(state: AgentState) -> dict:

@@ -13,22 +13,19 @@ class Settings(BaseSettings):
     """
 
     # Tavily 搜索 API 密钥
-    tavily_api_key: str = ""
+    TAVILY_API_KEY: str = ""
 
     # DeepSeek API 备援密钥
-    deepseek_api_key: str = ""
+    DEEPSEEK_API_KEY: str = ""
 
-    # Ollama 本地模型名称（默认使用 qwen2.5）
-    ollama_model: str = "qwen2.5"
+    # Ollama本地模型名称
+    OLLAMA_MODEL_NAME: str = ""
 
     # Ollama 本地服务地址
-    ollama_base_url: str = "http://localhost:11434"
+    OLLAMA_BASE_URL: str = ""
 
     # OpenAI 兼容 API 地址（备援使用）
-    openai_base_url: str = ""
-
-    # OpenAI API 密钥（备援使用）
-    openai_api_key: str = ""
+    OPENAI_BASE_URL: str = ""
 
     model_config = {
         "env_file": ".env",
