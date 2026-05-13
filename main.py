@@ -94,7 +94,7 @@ def build_graph():
     builder.add_conditional_edges(
         source="evaluator",  # 来源节点：从 evaluator 出发
         path=should_continue,  # 条件判断函数：返回 "retry" 或 "writer"
-        edge_map={  # 映射关系：返回值 → 目标节点
+        path_map={  # 映射关系：返回值 → 目标节点
             "retry": "planner",  # 返回 retry → 回到 planner 重新搜索
             "writer": "writer",  # 返回 writer → 进入最终报告生成
         },
@@ -133,7 +133,9 @@ async def run_agent(user_query: str) -> str:
 
 
 if __name__ == "__main__":
+    # =============测试======================
     # asyncio.run(test_planner())
+    # ======================单轮循环==========================
     query = input("请输入您的问题：").strip()
     if not query:
         query = "LangGraph 和 LangChain 的区别"
@@ -143,3 +145,4 @@ if __name__ == "__main__":
     print(report)
     print("\n" + "=" * 60)
     print(f"Metrics 数据已保存至: {metrics.data_path}")
+    # ================================================================

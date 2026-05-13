@@ -1,33 +1,41 @@
 """Evaluator 节点：评估搜索结果充分性，给出置信度和缺失信息。"""
 
-from langchain_ollama import ChatOllama
+from langchain_core.runnables import RunnableConfig
 
-from config import settings
 from src.state import AgentState
 from src.utils.json_parser import robust_json_parse
+from src.utils.llm_factory import get_llm
 from src.utils.logger import log_node
-
-llm = ChatOllama(model=settings.ollama_model_name, temperature=0)
 
 
 @log_node("evaluator")
-async def evaluator(state: AgentState) -> dict:
+async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> dict:
+    """评估当前搜索结果是否足够回答用户问题。
+
+    通过请求级 config 动态选择 LLM provider，
+    返回：置信度、缺失信息、建议重试关键词、迭代次数+1。
+
+    Args:
+        state: 当前全局状态，含 user_query、search_results、iteration。
+        config: LangGraph RunnableConfig，其中的 configurable.llm_provider
+               指定本节点使用的 LLM（deepseek / ollama）。
+               由 graph.ainvoke 调用方在请求级传入，节点不依赖全局状态。
+
+    Returns:
+        部分状态更新字典，含 confidence_score、missing_info、
+        retry_keywords、iteration。
     """
-    评估当前搜索结果是否足够回答用户问题
-    返回：置信度、缺失信息、建议重试关键词、迭代次数+1
-    """
-    # 从状态中获取核心输入：用户问题、搜索结果、当前迭代次数
     query = state["user_query"]
     results = state.get("search_results", [])
     iteration = state.get("iteration", 0)
 
-    # 构造搜索结果摘要：最多取前5条，每条只保留500字符，避免过长
-    # 格式：关键词 + 内容片段，用双换行分隔
+    # 根据请求级 config 动态创建 LLM 实例
+    llm = get_llm(temperature=0, config=config)
+
     results_summary = "\n\n".join(
         f"关键词：{r['keyword']}\n内容：{r['content'][:500]}" for r in results[:5]
     )
 
-    # 构造给大模型的提示词：明确要求输出JSON格式，定义字段含义
     prompt = f"""用户问题：{query}
 搜索结果：
 {results_summary}
@@ -41,21 +49,16 @@ async def evaluator(state: AgentState) -> dict:
 如果信息已足够，missing_info 为空字符串，retry_keywords 为空列表。
 只输出 JSON，不要额外文字。"""
 
-    # 异步调用大模型获取评估结果
     response = await llm.ainvoke(prompt)
 
-    # 统一转为字符串，确保后续解析正常（兼容大模型不同返回格式）
     content = response.content if isinstance(response.content, str) else str(response.content)
 
-    # 稳健解析JSON（自动处理大模型常见的格式错误、多余字符）
     parsed = await robust_json_parse(content)
 
-    # 安全提取JSON字段，设置默认值防止键不存在报错
     confidence = float(parsed.get("confidence_score", 0.0))
     missing = parsed.get("missing_info", "")
     retry = parsed.get("retry_keywords", [])
 
-    # 返回更新后的状态：置信度、缺失信息、重试关键词、迭代次数+1
     return {
         "confidence_score": confidence,
         "missing_info": missing,

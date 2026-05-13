@@ -3,7 +3,14 @@
 从项目根目录 .env 文件加载环境变量，提供类型安全的全局配置访问。
 """
 
+from enum import StrEnum
+
 from pydantic_settings import BaseSettings
+
+
+class LLMProvider(StrEnum):
+    OLLAMA = "ollama"
+    DEEPSEEK = "deepseek"
 
 
 class Settings(BaseSettings):
@@ -19,6 +26,8 @@ class Settings(BaseSettings):
     # DeepSeek API 备援密钥
     deepseek_api_key: str = ""
 
+    # DeepSeek 本地模型名称
+    DEEPSEEK_MODEL_NAME: str = ""
     # Ollama 本地模型名称
     ollama_model_name: str = ""
 
@@ -30,6 +39,8 @@ class Settings(BaseSettings):
 
     # 结果可信度阈值（0~1）
     confidence_threshold: float = 0.8
+    # 枚举字段，控制 planner 和 evaluator 使用的模型提供商
+    llm_provider: LLMProvider = LLMProvider.OLLAMA  # 默认本地
 
     # 最大迭代次数
     max_iterations: int = 3
