@@ -13,15 +13,15 @@ from src.utils.json_parser import robust_json_parse
 # 初始化 Ollama 本地 LLM 实例
 # temperature=0 确保每次输出稳定可复现，适合关键词提取任务
 llm = ChatOllama(
-    model=settings.OLLAMA_MODEL_NAME,
-    base_url=settings.OLLAMA_BASE_URL,
+    model=settings.ollama_model_name,
+    base_url=settings.ollama_base_url,
     temperature=0,
     # api_key=settings.OLLAMA_API_KEY,
 )
 
 
 async def planner(state: AgentState) -> dict:
-    """LangGraph 节点函数：根据用户查询生成搜索计划。
+    """LangGraph 节点函数：根据用户查询（以及缺失信息）生成搜索关键词列表。
 
     作为 LangGraph 有向图中的 Planner 节点，此函数接收当前全局状态，
     通过 LLM 分析用户查询并生成 3-5 个高价值搜索关键词。
@@ -44,12 +44,19 @@ async def planner(state: AgentState) -> dict:
     """
     query = state["user_query"]
     missing = state.get("missing_info", "")
+    retry_keywords = state.get("retry_keywords", [])
 
-    # 构造提示词，如有上一轮缺失信息则一并告知 LLM 补充搜索
-    missing_hint = f"上一轮缺少的信息：{missing}" if missing else ""
+    # 构造提示词：整合上一轮的缺失信息和建议关键词
+    hints: list[str] = []
+    if missing:
+        hints.append(f"上一轮缺少的信息：{missing}")
+    if retry_keywords:
+        hints.append(f"建议补充搜索以下关键词：{', '.join(retry_keywords)}")
+    hint_text = "\n".join(hints)
+
     prompt = (
         f"用户问题：{query}\n"
-        f"{missing_hint}\n"
+        f"{hint_text}\n"
         '请生成3-5个搜索关键词，输出JSON格式：{"plan": ["关键词1", "关键词2"]}'
     )
 
@@ -60,7 +67,7 @@ async def planner(state: AgentState) -> dict:
     # 从 LLM 响应中提取 JSON，降级时使用原始查询作为唯一关键词
     # response.content 类型为 str | list，此处确保传入字符串
     content = response.content if isinstance(response.content, str) else str(response.content)
-    data = robust_json_parse(content)
+    data = await robust_json_parse(content)
     plan = data.get("plan", [query])
 
     return {"plan": plan}

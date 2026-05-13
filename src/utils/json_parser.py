@@ -5,8 +5,9 @@
 
 import json
 import re
-import urllib.request
 from typing import Any
+
+import httpx
 
 from config import settings
 from src.utils.metrics import metrics
@@ -14,7 +15,7 @@ from src.utils.metrics import metrics
 # DeepSeek API 配置（OpenAI 兼容接口）
 # 通过 pydantic-settings 自动加载 .env 中的 DEEPSEEK_API_KEY
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_API_KEY = settings.DEEPSEEK_API_KEY
+DEEPSEEK_API_KEY = settings.deepseek_api_key
 
 
 def _parse_direct(text: str) -> dict[str, Any] | None:
@@ -27,13 +28,30 @@ def _parse_direct(text: str) -> dict[str, Any] | None:
 
 
 def _parse_regex_nested(text: str) -> dict[str, Any] | None:
-    """策略2：嵌套感知正则提取，匹配最外层 { ... } 允许内部嵌套一层。"""
-    match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
+    """
+    策略2：嵌套感知正则提取
+    作用：从文本里提取 **最外层 { ... }**，支持内部嵌套一层 { }
+    例如：好的，这是结果 {"a": {"b": 1}} 谢谢 → 提取 {"a": {"b": 1}}
+    """
+    # 核心：正则匹配 最外层 { ... }，允许内部嵌套一层 { }
+    match = re.search(
+        r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}",  # 嵌套感知正则
+        text,
+        re.DOTALL,  # 让 . 可以匹配换行符
+    )
+
+    # 如果没匹配到任何 { ... } → 返回 None
     if not match:
         return None
+
     try:
+        # 把匹配到的字符串 → 转成 JSON 字典
         result = json.loads(match.group())
+
+        # 确保返回的是字典，不是列表/字符串等其他类型
         return result if isinstance(result, dict) else None
+
+    # 解析失败 → 返回 None
     except json.JSONDecodeError:
         return None
 
@@ -50,11 +68,10 @@ def _parse_regex_greedy(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _repair_with_deepseek(malformed_text: str) -> str | None:
+async def _repair_with_deepseek(malformed_text: str) -> str | None:
     """策略4：调用 DeepSeek API 修复损坏的 JSON 文本。
 
-    向 DeepSeek 发送损坏的文本，要求其修复为标准 JSON 格式后返回。
-    使用同步 HTTP 调用以保持与 robust_json_parse 的兼容性。
+    使用 httpx.AsyncClient 原生异步 HTTP 调用，不阻塞事件循环。
 
     Args:
         malformed_text: 三层正则策略均无法解析的原始文本。
@@ -71,54 +88,48 @@ def _repair_with_deepseek(malformed_text: str) -> str | None:
         "只输出修复后的 JSON，不要添加任何解释、markdown 标记或额外文本。"
     )
 
-    payload = json.dumps(
-        {
-            "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"请修复以下文本中的 JSON：\n{malformed_text}"},
-            ],
-            "temperature": 0,
-            "max_tokens": 2000,
-        }
-    ).encode("utf-8")
-
-    req = urllib.request.Request(
-        DEEPSEEK_API_URL,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        },
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            body: dict[str, Any] = json.loads(response.read().decode("utf-8"))
-        fixed_text = body["choices"][0]["message"]["content"].strip()
-        # 验证修复后的文本是否为合法 JSON 字典（且不包含误导性的 error 字段）
+    async with httpx.AsyncClient() as client:
         try:
-            parsed = json.loads(fixed_text)
-            if isinstance(parsed, dict) and "error" not in parsed:
-                return str(fixed_text)
-            else:
-                # 解析出的是非字典，或者包含 error 字段，视为无效修复
+            response = await client.post(
+                DEEPSEEK_API_URL,
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"请修复以下文本中的 JSON：\n{malformed_text}"},
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 2000,
+                },
+                timeout=20.0,
+            )
+            if response.status_code != 200:
                 return None
-        except json.JSONDecodeError:
+            # ["choices"]：DeepSeek 的返回格式固定有一个 choices 数组里面存放 AI 给出的回答列表
+            # fixed_text： 提取 DeepSeek 修复好的 JSON 字符串
+            fixed_text: str = response.json()["choices"][0]["message"]["content"].strip()
+            # 验证修复后的文本是否为合法 JSON 字典（且不包含误导性的 error 字段）
+            try:
+                parsed = json.loads(fixed_text)
+                if isinstance(parsed, dict) and "error" not in parsed:
+                    return fixed_text
+            except json.JSONDecodeError:
+                pass
             return None
-    except (urllib.error.URLError, json.JSONDecodeError, OSError, KeyError, IndexError):
-        return None
+        # 捕获 httpx 请求错误、JSON 解析错误、以及可能的键错误或索引错误，统一返回 None
+        except (httpx.HTTPError, json.JSONDecodeError, KeyError, IndexError):
+            return None
 
 
-def robust_json_parse(text: str) -> dict[str, Any]:
+async def robust_json_parse(text: str) -> dict[str, Any]:
     """从 LLM 输出的文本中鲁棒地提取 JSON 对象。
 
     四层回退机制（从严格到宽松）：
     1. 直接 JSON 解析（_parse_direct）
     2. 嵌套感知的正则提取（_parse_regex_nested）
     3. 贪婪正则匹配（_parse_regex_greedy）
-    4. DeepSeek LLM 修复（_repair_with_deepseek）
+    4. DeepSeek LLM 修复（_repair_with_deepseek，使用 httpx 原生异步调用）
 
     Args:
         text: LLM 的原始输出字符串，可能包含非 JSON 内容。
@@ -148,8 +159,8 @@ def robust_json_parse(text: str) -> dict[str, Any]:
         metrics.record_parse(success=True, fallback=True)
         return result
 
-    # 策略4：DeepSeek LLM 模型降级修复
-    fixed_text = _repair_with_deepseek(text)
+    # 策略4：DeepSeek LLM 模型降级修复（httpx 异步调用）
+    fixed_text = await _repair_with_deepseek(text)
     if fixed_text:
         result = _parse_direct(fixed_text)
         if result is not None:

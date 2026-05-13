@@ -9,23 +9,30 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """项目全局配置，自动从 .env 文件和环境变量中加载。
 
-    所有字段名自动映射为大写环境变量（如 ollama_model → OLLAMA_MODEL）。
+    pydantic-settings 默认 case_sensitive=False，因此 .env 中的大写环境变量
+    （如 TAVILY_API_KEY）会自动映射到对应的小写字段名。
     """
 
     # Tavily 搜索 API 密钥
-    TAVILY_API_KEY: str = ""
+    tavily_api_key: str = ""
 
     # DeepSeek API 备援密钥
-    DEEPSEEK_API_KEY: str = ""
+    deepseek_api_key: str = ""
 
-    # Ollama本地模型名称
-    OLLAMA_MODEL_NAME: str = ""
+    # Ollama 本地模型名称
+    ollama_model_name: str = ""
 
     # Ollama 本地服务地址
-    OLLAMA_BASE_URL: str = ""
+    ollama_base_url: str = ""
 
     # OpenAI 兼容 API 地址（备援使用）
-    OPENAI_BASE_URL: str = ""
+    openai_base_url: str = ""
+
+    # 结果可信度阈值（0~1）
+    confidence_threshold: float = 0.8
+
+    # 最大迭代次数
+    max_iterations: int = 3
 
     model_config = {
         "env_file": ".env",

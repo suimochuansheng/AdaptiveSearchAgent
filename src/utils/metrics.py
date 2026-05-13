@@ -19,6 +19,7 @@ class Metrics:
         self._data_path = data_path  # 存储路径，作为私有属性防止被误序列化
 
         # --- 核心指标定义 ---
+        self.parse_total = 0  # JSON 解析总调用次数（分母）
         self.parse_success = 0  # 直接解析成功的次数 (Strategy 1)
         self.parse_fallback = 0  # 通过正则回退机制解析成功的次数 (Strategy 2/3)
         self.parse_deepseek_fallback = 0  # 通过调用更强的模型（如 DeepSeek）重试成功的次数
@@ -61,6 +62,7 @@ class Metrics:
         self._data_path.parent.mkdir(parents=True, exist_ok=True)
         # 显式定义需要保存的字段，避免保存不必要的内部状态
         to_save = {
+            "parse_total": self.parse_total,
             "parse_success": self.parse_success,
             "parse_fallback": self.parse_fallback,
             "parse_deepseek_fallback": self.parse_deepseek_fallback,
@@ -80,6 +82,7 @@ class Metrics:
             fallback: 是否是通过本地正则回退机制成功的
             deepseek_fallback: 是否是通过调用外部模型修复成功的
         """
+        self.parse_total += 1
         if success:
             self.parse_success += 1
         if fallback:
@@ -107,10 +110,9 @@ class Metrics:
         Returns:
             float: 0.0 到 1.0 之间的成功率
         """
-        # 注意：这里的逻辑假设 success 是总计数，如果 success 仅指第一层成功，
-        # 则 total 计算方式可能需要调整为所有层级之和
-        total = self.parse_success + self.parse_fallback + self.parse_deepseek_fallback
-        return self.parse_success / total if total > 0 else 0.0
+        if self.parse_total > 0:
+            return self.parse_success / self.parse_total
+        return 0.0
 
 
 # --- 全局单例 ---
