@@ -55,6 +55,7 @@ async def planner(state: AgentState, config: RunnableConfig | None = None) -> di
 
     response = await llm.ainvoke(prompt)
     content = response.content if isinstance(response.content, str) else str(response.content)
+    # 使用鲁棒 JSON 解析器提取关键词列表
     parsed = await robust_json_parse(content)
     plan = parsed.get("plan", [query])
     plan = list(dict.fromkeys(plan))[:5]
