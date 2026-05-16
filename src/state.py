@@ -60,3 +60,4 @@ class AgentState(TypedDict):
 
     # 分批 wave 所需字段
     pending_keywords: list[str]  # 尚未处理的关键词（用于分批并行搜索）
+    _batch_keywords: list[str]  # 当前批次待搜索的关键词（parallel_searcher → 路由函数的内部通道）

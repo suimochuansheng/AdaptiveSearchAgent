@@ -11,7 +11,7 @@ from langgraph.graph import END, StateGraph
 
 from config import settings
 from src.agents.evaluator import evaluator
-from src.agents.parallel_searcher import parallel_searcher
+from src.agents.parallel_searcher import parallel_searcher, route_to_search_workers
 from src.agents.planner import planner
 from src.agents.search_worker import search_worker
 from src.agents.writer import writer
@@ -39,6 +39,7 @@ async def test_planner() -> None:
         "task_id": "test",
         "total_tokens": 0,
         "pending_keywords": [],
+        "_batch_keywords": [],
     }
 
     print(f"输入查询: {state['user_query']}")
@@ -134,7 +135,21 @@ def should_continue_wave(state: AgentState) -> str:
 
 
 def build_graph():
-    """构建 LangGraph 工作流（状态机执行图）-并行 search_worker 版本"""
+    """构建 LangGraph 工作流（状态机执行图）-并行 search_worker 版本
+
+    图结构：
+        planner → parallel_searcher → (条件边: Send 扇出到 search_worker
+          或跳过搜索直接到 evaluator)
+        search_worker → evaluator → (条件边: parallel_searcher 继续下一波
+          / planner 重试 / writer 结束)
+        writer → END
+
+    Send 扇出机制：
+        parallel_searcher 节点负责准备关键词批次（写入 _batch_keywords），
+        随后的 add_conditional_edges 调用 route_to_search_workers 路由函数，
+        该函数返回 list[Send] 实现 search_worker 的并行扇出。
+        所有 search_worker 完成后通过固定边汇聚到 evaluator。
+    """
     builder = StateGraph(AgentState)
 
     # 加载节点
@@ -144,11 +159,22 @@ def build_graph():
     builder.add_node("evaluator", evaluator)
     builder.add_node("writer", writer)
 
-    # 开始编写图
+    # 图结构
     builder.set_entry_point("planner")
     builder.add_edge("planner", "parallel_searcher")
-    #
+
+    # 条件边：parallel_searcher 之后，根据关键词批次决定 Send 扇出或跳过
+    builder.add_conditional_edges(
+        "parallel_searcher",
+        route_to_search_workers,
+        {
+            "evaluator": "evaluator",  # 无关键词时直接进入评估
+        },
+    )
+
+    # search_worker 完成后汇聚到 evaluator
     builder.add_edge("search_worker", "evaluator")
+
     # 条件边：从 evaluator 出发，根据 should_continue_wave 决定下一节点
     builder.add_conditional_edges(
         "evaluator",
@@ -180,6 +206,7 @@ async def run_agent(user_query: str) -> str:
         "task_id": str(uuid.uuid4()),
         "total_tokens": 0,
         "pending_keywords": [],
+        "_batch_keywords": [],
     }
     # 构建 LangGraph 工作流
     graph = build_graph()
