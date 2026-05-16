@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 # 仅用于类型检查的导入，运行时不会执行
 if TYPE_CHECKING:
     from src.state import AgentState
-
 import asyncio
 from unittest.mock import AsyncMock, patch
 
@@ -505,7 +504,8 @@ class TestMultiWaveIntegration:
             assert len(state["search_results"]) == limit * 2  # 两波累计
 
             # Step 8: evaluator → 评估
-            state.update(await evaluator(state))  # type: ignore[typeddict-item]
+            # type: ignore[typeddict-item]
+            state.update(await evaluator(state))
 
             # Step 9: should_continue_wave → pending 空 + 高置信度 → writer
             decision2 = should_continue_wave(state)
