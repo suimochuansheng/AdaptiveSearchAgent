@@ -26,7 +26,7 @@ class Metrics:
         self.total_tokens = 0  # 累计消耗的 Token 总量
         self.iterations_per_query: list[int] = []  # 记录每次查询经历的迭代次数（反映任务复杂度）
         self.search_rounds = 0  # 累计搜索轮次
-
+        self.parallel_speedup = 0.0  # 并行加速
         # 初始化时从本地文件加载已有数据
         self._load()
 
@@ -113,6 +113,11 @@ class Metrics:
         if self.parse_total > 0:
             return self.parse_success / self.parse_total
         return 0.0
+
+    def record_parallel_speedup(self, speedup: float):
+        """增加并行性能统计"""
+        self.parallel_speedup = speedup
+        self.save()
 
 
 # --- 全局单例 ---

@@ -4,7 +4,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.state import AgentState
 from src.utils.json_parser import robust_json_parse
-from src.utils.llm_factory import get_llm
+from src.utils.llm_factory import get_llm, limited_llm_call
 from src.utils.logger import log_node
 
 
@@ -13,21 +13,20 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
     """评估当前搜索结果是否足够回答用户问题。
 
     通过请求级 config 动态选择 LLM provider，
-    返回：置信度、缺失信息、建议重试关键词、迭代次数+1。
+    返回：置信度、缺失信息、建议重试关键词。
+    （iteration 递增由 should_continue_wave 统一管理，本节点不再处理。）
 
     Args:
-        state: 当前全局状态，含 user_query、search_results、iteration。
+        state: 当前全局状态，含 user_query、search_results。
         config: LangGraph RunnableConfig，其中的 configurable.llm_provider
                指定本节点使用的 LLM（deepseek / ollama）。
                由 graph.ainvoke 调用方在请求级传入，节点不依赖全局状态。
 
     Returns:
-        部分状态更新字典，含 confidence_score、missing_info、
-        retry_keywords、iteration。
+        部分状态更新字典，含 confidence_score、missing_info、retry_keywords。
     """
     query = state["user_query"]
     results = state.get("search_results", [])
-    iteration = state.get("iteration", 0)
 
     # 根据请求级 config 动态创建 LLM 实例
     llm = get_llm(temperature=0, config=config)
@@ -49,9 +48,8 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
 如果信息已足够，missing_info 为空字符串，retry_keywords 为空列表。
 只输出 JSON，不要额外文字。"""
 
-    response = await llm.ainvoke(prompt)
-
-    content = response.content if isinstance(response.content, str) else str(response.content)
+    # 通过限流包装器调用 LLM，防止并发过高
+    content = await limited_llm_call(llm, prompt)
 
     parsed = await robust_json_parse(content)
 
@@ -63,5 +61,4 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
         "confidence_score": confidence,
         "missing_info": missing,
         "retry_keywords": retry,
-        "iteration": iteration + 1,
     }

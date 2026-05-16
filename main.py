@@ -11,6 +11,7 @@ from langgraph.graph import END, StateGraph
 
 from config import settings
 from src.agents.evaluator import evaluator
+from src.agents.parallel_searcher import parallel_searcher
 from src.agents.planner import planner
 from src.agents.search_worker import search_worker
 from src.agents.writer import writer
@@ -37,6 +38,7 @@ async def test_planner() -> None:
         "human_approved": False,
         "task_id": "test",
         "total_tokens": 0,
+        "pending_keywords": [],
     }
 
     print(f"输入查询: {state['user_query']}")
@@ -63,9 +65,10 @@ def should_continue(state: AgentState) -> str:
         return "retry"
 
 
-def build_graph():
+def build_graph_serial():
     """
-    构建 LangGraph 工作流（状态机执行图）
+    构建 LangGraph 工作流（状态机执行图）-串行search_worker版本
+        planner -> search_worker (串行) -> evaluator -> (条件边) -> writer 或 planner
     作用：定义 Agent 的执行节点、跳转逻辑、判断条件，最终编译成可运行的工作流
     """
     # 1. 创建 StateGraph 构建器，绑定共享状态类型 AgentState
@@ -107,6 +110,60 @@ def build_graph():
     return builder.compile()
 
 
+def should_continue_wave(state: AgentState) -> str:
+    """
+    综合判断：先处理未完成的 wave（pending_keywords），
+    若无 pending 则根据置信度和迭代次数决定是重试还是结束。
+    """
+    # 如果还有未搜索的关键词，继续下一批（不经过 planner）
+    if state.get("pending_keywords"):
+        return "parallel_searcher"
+
+    # 所有批次完成，判断是否需要重试或结束
+    if (
+        state["confidence_score"] >= settings.confidence_threshold
+        or state["iteration"] >= settings.max_iterations
+    ):
+        # 记录本次查询的收敛迭代次数
+        metrics.record_iterations(state["iteration"])
+        return "writer"
+    else:
+        # 即将重试，增加迭代计数
+        state["iteration"] = state.get("iteration", 0) + 1
+        return "planner"
+
+
+def build_graph():
+    """构建 LangGraph 工作流（状态机执行图）-并行 search_worker 版本"""
+    builder = StateGraph(AgentState)
+
+    # 加载节点
+    builder.add_node("planner", planner)
+    builder.add_node("parallel_searcher", parallel_searcher)
+    builder.add_node("search_worker", search_worker)
+    builder.add_node("evaluator", evaluator)
+    builder.add_node("writer", writer)
+
+    # 开始编写图
+    builder.set_entry_point("planner")
+    builder.add_edge("planner", "parallel_searcher")
+    #
+    builder.add_edge("search_worker", "evaluator")
+    # 条件边：从 evaluator 出发，根据 should_continue_wave 决定下一节点
+    builder.add_conditional_edges(
+        "evaluator",
+        should_continue_wave,
+        {
+            "parallel_searcher": "parallel_searcher",  # 继续下一批搜索
+            "planner": "planner",  # 重试：回到 planner
+            "writer": "writer",  # 结束：生成报告
+        },
+    )
+    builder.add_edge("writer", END)
+
+    return builder.compile()
+
+
 async def run_agent(user_query: str) -> str:
     """运行 Agent，返回最终报告。"""
     # 初始化全局状态，包含用户查询和其他必要字段
@@ -122,6 +179,7 @@ async def run_agent(user_query: str) -> str:
         "human_approved": True,  # 暂时自动批准
         "task_id": str(uuid.uuid4()),
         "total_tokens": 0,
+        "pending_keywords": [],
     }
     # 构建 LangGraph 工作流
     graph = build_graph()

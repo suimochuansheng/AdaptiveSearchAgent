@@ -26,6 +26,7 @@ def create_test_state(overrides: dict[str, Any] | None = None) -> AgentState:
         "human_approved": False,
         "task_id": "test-id",
         "total_tokens": 0,
+        "pending_keywords": [],
     }
     if overrides:
         defaults.update(overrides)  # type: ignore[typeddict-item]

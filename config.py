@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # 最大迭代次数
     max_iterations: int = 3
 
+    # 并发控制
+    max_concurrent_searches: int = 2  # 同时执行的搜索任务数（Send 并发数）
+    max_concurrent_llm_calls: int = 2  # 同时执行的 LLM 调用数（Semaphore）
+    use_parallel_search: bool = True  # 是否启用并行搜索（用于性能对比）
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

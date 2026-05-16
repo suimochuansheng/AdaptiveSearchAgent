@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.state import AgentState
 from src.utils.json_parser import robust_json_parse
-from src.utils.llm_factory import get_llm
+from src.utils.llm_factory import get_llm, limited_llm_call
 
 
 async def planner(state: AgentState, config: RunnableConfig | None = None) -> dict:
@@ -53,10 +53,11 @@ async def planner(state: AgentState, config: RunnableConfig | None = None) -> di
     请为这个问题生成 3~5 个不同的搜索关键词，覆盖不同角度。
     只输出 JSON，格式：{{"plan": ["关键词1", "关键词2", ...]}}"""
 
-    response = await llm.ainvoke(prompt)
-    content = response.content if isinstance(response.content, str) else str(response.content)
+    # limited_llm_call 返回的已经是纯文本字符串，无需再提取 .content
+    content = await limited_llm_call(llm, prompt)
     # 使用鲁棒 JSON 解析器提取关键词列表
     parsed = await robust_json_parse(content)
     plan = parsed.get("plan", [query])
     plan = list(dict.fromkeys(plan))[:5]
+    print(f"Planner 输出原始内容: {content}")
     return {"plan": plan}

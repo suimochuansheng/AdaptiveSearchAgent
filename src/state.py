@@ -57,3 +57,6 @@ class AgentState(TypedDict):
     # 可观测性与监控
     task_id: str
     total_tokens: int
+
+    # 分批 wave 所需字段
+    pending_keywords: list[str]  # 尚未处理的关键词（用于分批并行搜索）

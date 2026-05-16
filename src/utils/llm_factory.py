@@ -6,12 +6,21 @@
 2. config["configurable"]["llm_provider"]（生产路径，唯一外部入口）
 """
 
+import asyncio
+
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
 from langchain_deepseek import ChatDeepSeek
 from langchain_ollama import ChatOllama
 from pydantic import SecretStr
 
 from config import settings
+
+# 全局信号量（在模块加载时创建）
+# 这是一个全局唯一的闸机
+# 整个程序从头到尾只创建一个
+# 所有协程都共用它来限流
+_llm_semaphore = None
 
 
 def _resolve_provider(config: RunnableConfig | None = None) -> str | None:
@@ -56,3 +65,29 @@ def get_llm(
             base_url=settings.ollama_base_url,
             temperature=temperature,
         )
+
+
+# 就是个获取闸机的函数
+# 第一次调用 → 创建闸机（最多放 2 个）
+# 之后调用 → 直接返回已经创建好的闸机
+# 保证全局唯一、不重复创建，限流才有效
+def get_llm_semaphore(limit: int = 2):
+    """获取全局 LLM 调用信号量，控制并发调用数。"""
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        # 第一次调用时创建信号量，后续调用复用同一个实例
+        # Semaphore理解为一个限流闸机，允许同时通过的最大数量为 limit，多余的调用会被阻塞等待
+        _llm_semaphore = asyncio.Semaphore(limit)
+    return _llm_semaphore
+
+
+async def limited_llm_call(llm: BaseChatModel, prompt: str) -> str:
+    """带并发限制的 LLM 调用。"""
+    sem = get_llm_semaphore()  # 获取全局信号量实例-拿到全局闸机
+    # async with 是Python 固定异步语法，同一时刻，最多只有 sem 限定数量的异步任务在并发执行
+    async with sem:  # 👇 这行 = 排队进闸机，最多2个同时进
+        response = await llm.ainvoke(prompt)
+        # 显式标注类型，消除 mypy 的 Any 污染
+        raw: object = response.content
+        content: str = raw if isinstance(raw, str) else str(raw)
+        return content
