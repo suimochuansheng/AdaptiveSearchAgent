@@ -61,3 +61,6 @@ Thumbs.db
 # deepcode 和 .claude的skills
 .claude/
 .deepcode/
+
+# 文档文件
+ documents/
