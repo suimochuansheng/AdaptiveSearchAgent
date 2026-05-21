@@ -138,25 +138,25 @@ async def robust_json_parse(text: str) -> dict[str, Any]:
         dict: 解析成功返回字典，所有策略均失败返回空字典。
     """
     if not text or not text.strip():
-        metrics.record_parse(success=False)
+        await metrics.record_parse(success=False)
         return {}
 
     # 策略1：直接 JSON 解析
     result = _parse_direct(text)
     if result is not None:
-        metrics.record_parse(success=True)
+        await metrics.record_parse(success=True)
         return result
 
     # 策略2：嵌套感知正则提取
     result = _parse_regex_nested(text)
     if result is not None:
-        metrics.record_parse(success=True, fallback=True)
+        await metrics.record_parse(success=True, fallback=True)
         return result
 
     # 策略3：贪婪正则匹配
     result = _parse_regex_greedy(text)
     if result is not None:
-        metrics.record_parse(success=True, fallback=True)
+        await metrics.record_parse(success=True, fallback=True)
         return result
 
     # 策略4：DeepSeek LLM 模型降级修复（httpx 异步调用）
@@ -164,9 +164,9 @@ async def robust_json_parse(text: str) -> dict[str, Any]:
     if fixed_text:
         result = _parse_direct(fixed_text)
         if result is not None:
-            metrics.record_parse(success=True, deepseek_fallback=True)
+            await metrics.record_parse(success=True, deepseek_fallback=True)
             return result
 
     # 所有策略均失败，最终降级返回空字典
-    metrics.record_parse(success=False)
+    await metrics.record_parse(success=False)
     return {}

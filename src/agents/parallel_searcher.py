@@ -88,5 +88,6 @@ def route_to_search_workers(state: AgentState) -> list[Send] | str:
     batch = state.get("_batch_keywords", [])
     if not batch:
         return "evaluator"
-
-    return [Send("search_worker", {"keyword": kw}) for kw in batch]
+    print(f"路由函数生成 Send 任务，关键词批次: {batch}")
+    Sends = [Send("search_worker", {"keyword": kw}) for kw in batch]
+    return Sends

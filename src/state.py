@@ -56,8 +56,13 @@ class AgentState(TypedDict):
 
     # 可观测性与监控
     task_id: str
-    total_tokens: int
+    total_tokens: Annotated[int, operator.add]  # 全流程累计 Token 消耗（每次 LLM 调用自动累加）
+    input_tokens: Annotated[int, operator.add]  # 累计输入 Token
+    output_tokens: Annotated[int, operator.add]  # 累计输出 Token
+    current_llm: str  # 当前实际使用的 LLM 提供商（ollama / deepseek），用于观测备援切换
 
     # 分批 wave 所需字段
     pending_keywords: list[str]  # 尚未处理的关键词（用于分批并行搜索）
     _batch_keywords: list[str]  # 当前批次待搜索的关键词（parallel_searcher → 路由函数的内部通道）
+
+    thread_id: str  # 会话唯一标识，与 config.thread_id 对应

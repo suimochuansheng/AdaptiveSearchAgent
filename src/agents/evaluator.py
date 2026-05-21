@@ -4,7 +4,7 @@ from langchain_core.runnables import RunnableConfig
 
 from src.state import AgentState
 from src.utils.json_parser import robust_json_parse
-from src.utils.llm_factory import get_llm, limited_llm_call
+from src.utils.llm_utils import llm_call_with_fallback
 from src.utils.logger import log_node
 
 
@@ -12,24 +12,20 @@ from src.utils.logger import log_node
 async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> dict:
     """评估当前搜索结果是否足够回答用户问题。
 
-    通过请求级 config 动态选择 LLM provider，
-    返回：置信度、缺失信息、建议重试关键词。
-    （iteration 递增由 should_continue_wave 统一管理，本节点不再处理。）
+    通过 llm_call_with_fallback 统一调用 LLM，自动获得备援与 Token 计数。
+    返回：置信度、缺失信息、建议重试关键词、递增后的迭代轮次、
+          Token 计数增量、当前 LLM 提供商。
 
     Args:
         state: 当前全局状态，含 user_query、search_results。
         config: LangGraph RunnableConfig，其中的 configurable.llm_provider
-               指定本节点使用的 LLM（deepseek / ollama）。
-               由 graph.ainvoke 调用方在请求级传入，节点不依赖全局状态。
+               指定本节点使用的 LLM。
 
     Returns:
-        部分状态更新字典，含 confidence_score、missing_info、retry_keywords。
+        部分状态更新字典。
     """
     query = state["user_query"]
     results = state.get("search_results", [])
-
-    # 根据请求级 config 动态创建 LLM 实例
-    llm = get_llm(temperature=0, config=config)
 
     results_summary = "\n\n".join(
         f"关键词：{r['keyword']}\n内容：{r['content'][:500]}" for r in results[:5]
@@ -48,8 +44,15 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
 如果信息已足够，missing_info 为空字符串，retry_keywords 为空列表。
 只输出 JSON，不要额外文字。"""
 
-    # 通过限流包装器调用 LLM，防止并发过高
-    content = await limited_llm_call(llm, prompt)
+    # 统一调用入口：自带备援 + Token 计数 + 并发限流
+    content, in_tok, out_tok, total_tok = await llm_call_with_fallback(prompt, config)
+
+    # 从 config 中读取当前实际使用的 provider
+    current_provider = (
+        config["configurable"].get("llm_provider", "ollama")
+        if config and "configurable" in config
+        else "ollama"
+    )
 
     parsed = await robust_json_parse(content)
 
@@ -61,4 +64,9 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
         "confidence_score": confidence,
         "missing_info": missing,
         "retry_keywords": retry,
+        "iteration": state.get("iteration", 0) + 1,  # 本轮评估完成，递增轮次
+        "total_tokens": total_tok,  # operator.add 自动累加（API 直接返回 total）
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "current_llm": current_provider,
     }

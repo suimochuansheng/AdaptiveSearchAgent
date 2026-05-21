@@ -1,66 +1,65 @@
+"""指标统计组件（异步安全版）。
+
+用于记录 AI 模型的运行状态、JSON 解析命中率、Token 消耗以及搜索迭代次数。
+所有文件 I/O 操作（mkdir / open / json.dump）均通过 asyncio.to_thread()
+委托给线程池执行，不会阻塞 AsyncIO 事件循环，兼容 FastAPI / langgraph dev 等异步服务器。
+"""
+
+import asyncio
 import json
 from pathlib import Path
 
 
 class Metrics:
-    """
-    指标统计组件。
-    用于记录 AI 模型的运行状态、JSON 解析命中率、Token 消耗以及搜索迭代次数。
-    支持数据自动持久化到本地 JSON 文件。
+    """指标统计组件。
+
+    所有会触发磁盘写入的公开方法均为 async，内部通过 asyncio.to_thread()
+    将同步文件 I/O 抛给线程池，确保事件循环不被阻塞。
     """
 
     def __init__(self, data_path: Path = Path("data/metrics.json")):
-        """
-        初始化指标统计器。
-
-        Args:
-            data_path: 统计数据存储的本地路径，默认为 'data/metrics.json'
-        """
-        self._data_path = data_path  # 存储路径，作为私有属性防止被误序列化
+        """初始化指标统计器（同步，仅在模块导入时执行一次）。"""
+        self._data_path = data_path
 
         # --- 核心指标定义 ---
         self.parse_total = 0  # JSON 解析总调用次数（分母）
         self.parse_success = 0  # 直接解析成功的次数 (Strategy 1)
         self.parse_fallback = 0  # 通过正则回退机制解析成功的次数 (Strategy 2/3)
-        self.parse_deepseek_fallback = 0  # 通过调用更强的模型（如 DeepSeek）重试成功的次数
+        self.parse_deepseek_fallback = 0  # 通过调用 DeepSeek 重试成功的次数
         self.total_tokens = 0  # 累计消耗的 Token 总量
-        self.iterations_per_query: list[int] = []  # 记录每次查询经历的迭代次数（反映任务复杂度）
+        self.iterations_per_query: list[int] = []  # 每次查询的迭代次数
         self.search_rounds = 0  # 累计搜索轮次
-        self.parallel_speedup = 0.0  # 并行加速
-        # 初始化时从本地文件加载已有数据
-        self._load()
+        self.parallel_speedup = 0.0  # 并行加速比
+
+        # 初始化时从本地文件加载已有数据（同步，导入阶段无事件循环）
+        self._load_sync()
 
     @property
     def data_path(self) -> Path:
-        """获取当前指标文件存储路径"""
+        """获取当前指标文件存储路径。"""
         return self._data_path
 
-    def _load(self):
-        """
-        从本地 JSON 文件加载统计数据。
-        会自动过滤掉私有字段及只读属性，确保内部状态正确恢复。
-        """
-        if self._data_path.exists():
-            try:
-                with open(self._data_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                for k, v in data.items():
-                    # 跳过以 _ 开头的私有字段，跳过 data_path 属性
-                    if k.startswith("_") or k == "data_path":
-                        continue
-                    # 仅当对象拥有该属性时才进行赋值
-                    if hasattr(self, k):
-                        setattr(self, k, v)
-            except (json.JSONDecodeError, Exception) as e:
-                print(f"警告: 无法加载指标文件 {self._data_path}: {e}")
+    # ── 同步文件 I/O（仅供 to_thread 或初始化调用） ─────────────────
 
-    def save(self):
-        """
-        将当前的统计指标保存到本地 JSON 文件。
-        保存过程中会自动创建必要的文件夹目录。
-        """
+    def _load_sync(self) -> None:
+        """从本地 JSON 文件加载统计数据（同步，仅初始化时调用）。"""
+        if not self._data_path.exists():
+            return
+        try:
+            with open(self._data_path, encoding="utf-8") as f:
+                data = json.load(f)
+            for k, v in data.items():
+                if k.startswith("_") or k == "data_path":
+                    continue
+                if hasattr(self, k):
+                    setattr(self, k, v)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"警告: 无法加载指标文件 {self._data_path}: {e}")
+
+    def _save_sync(self) -> None:
+        """将当前指标写入磁盘（同步，供 asyncio.to_thread 调用）。"""
+        # 确保父目录存在（mkdir -p 语义）
         self._data_path.parent.mkdir(parents=True, exist_ok=True)
-        # 显式定义需要保存的字段，避免保存不必要的内部状态
         to_save = {
             "parse_total": self.parse_total,
             "parse_success": self.parse_success,
@@ -73,15 +72,21 @@ class Metrics:
         with open(self._data_path, "w", encoding="utf-8") as f:
             json.dump(to_save, f, indent=2, default=str)
 
-    def record_parse(self, success: bool, fallback: bool = False, deepseek_fallback: bool = False):
-        """
-        记录一次 JSON 解析的结果。
+    # ── 异步持久化（公开方法） ─────────────────────────────────────
 
-        Args:
-            success: 是否解析成功
-            fallback: 是否是通过本地正则回退机制成功的
-            deepseek_fallback: 是否是通过调用外部模型修复成功的
-        """
+    async def save(self) -> None:
+        """将当前指标异步写入磁盘（非阻塞）。"""
+        # asyncio.to_thread：把同步函数 _save_sync 丢到线程池执行，
+        # 主线程的事件循环可以继续处理其他协程，不会卡住服务器。
+        await asyncio.to_thread(self._save_sync)
+
+    async def record_parse(
+        self,
+        success: bool,
+        fallback: bool = False,
+        deepseek_fallback: bool = False,
+    ) -> None:
+        """记录一次 JSON 解析的结果（异步）。"""
         self.parse_total += 1
         if success:
             self.parse_success += 1
@@ -89,37 +94,32 @@ class Metrics:
             self.parse_fallback += 1
         if deepseek_fallback:
             self.parse_deepseek_fallback += 1
+        # 每次记录后异步持久化，防止程序崩溃丢失数据
+        await self.save()
 
-        # 每次记录后立即持久化，防止程序崩溃导致数据丢失
-        self.save()
-
-    def record_iterations(self, iterations: int):
-        """
-        记录单次请求的迭代深度（如 ReAct 模式下的思考轮次）。
-
-        Args:
-            iterations: 迭代次数
-        """
+    async def record_iterations(self, iterations: int) -> None:
+        """记录单次请求的迭代深度（异步）。"""
         self.iterations_per_query.append(iterations)
-        self.save()
+        await self.save()
+
+    async def record_parallel_speedup(self, speedup: float) -> None:
+        """记录并行加速比（异步）。"""
+        self.parallel_speedup = speedup
+        await self.save()
+
+    # ── 纯计算（同步，无 I/O） ─────────────────────────────────────
 
     def get_parse_success_rate(self) -> float:
-        """
-        计算 JSON 解析的总成功率（包含所有回退策略）。
+        """计算 JSON 解析的总成功率（包含所有回退策略）。
 
         Returns:
-            float: 0.0 到 1.0 之间的成功率
+            float: 0.0 到 1.0 之间的成功率。
         """
         if self.parse_total > 0:
             return self.parse_success / self.parse_total
         return 0.0
 
-    def record_parallel_speedup(self, speedup: float):
-        """增加并行性能统计"""
-        self.parallel_speedup = speedup
-        self.save()
 
-
-# --- 全局单例 ---
+# ── 全局单例 ─────────────────────────────────────────────────────────
 # 整个应用通过导入这个 metrics 实例来共享统计数据
 metrics = Metrics()

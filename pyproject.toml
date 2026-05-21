@@ -15,11 +15,20 @@ python-json-logger = "^4.1.0"
 pydantic-settings = "^2.14.0"
 tenacity = "^9.1.4"
 fastapi = "^0.136.1"
-uvicorn = "^0.46.0"
+uvicorn = {extras = ["standard"], version = "^0.47.0"}
 langchain-community = "^0.4.1"
 langchain-ollama = "^1.1.0"
 httpx = "^0.28.1"
 langchain-deepseek = "^1.0.1"
+langgraph-checkpoint-sqlite = "^2.0.0"  # 或者最新版本
+rich = "^13.0.0"
+langgraph-cli = {extras = ["inmem"], version = "^0.4.26"}
+langgraph-checkpoint-postgres = "^3.1.0"
+asyncpg = "^0.31.0"
+psycopg2-binary = "^2.9.12"
+python-dotenv = "^1.2.2"
+redis = "^7.4.0"
+pydantic = "^2.13.4"
 
 [build-system]
 requires = ["poetry-core"]

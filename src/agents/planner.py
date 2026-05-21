@@ -8,40 +8,27 @@ from langchain_core.runnables import RunnableConfig
 
 from src.state import AgentState
 from src.utils.json_parser import robust_json_parse
-from src.utils.llm_factory import get_llm, limited_llm_call
+from src.utils.llm_utils import llm_call_with_fallback
 
 
 async def planner(state: AgentState, config: RunnableConfig | None = None) -> dict:
-    """LangGraph 节点函数：根据用户查询（以及缺失信息）生成搜索关键词列表。
+    """根据用户查询（以及缺失信息）生成搜索关键词列表。
 
-    作为 LangGraph 有向图中的 Planner 节点，此函数接收当前全局状态，
-    通过 LLM 分析用户查询并生成 3-5 个高价值搜索关键词。
-
-    工作流程：
-    1. 从 state 中提取用户查询和上一轮缺失信息（如有）
-    2. 通过请求级 config 动态选择 LLM provider
-    3. 构造提示词，告知 LLM 搜索意图并指定 JSON 输出格式
-    4. 异步调用 LLM 生成关键词列表
-    5. 使用鲁棒 JSON 解析器提取结构化结果
-    6. 返回部分状态更新，LangGraph 自动合并到全局状态
+    通过 llm_call_with_fallback 统一调用 LLM，自动获得备援与 Token 计数。
+    返回：搜索计划 + Token 增量 + 当前 LLM 提供商。
 
     Args:
-        state: LangGraph 传递的当前全局状态（AgentState 字典）。
-               包含 user_query、iteration、missing_info 等字段。
+        state: LangGraph 传递的当前全局状态。
         config: LangGraph RunnableConfig，其中的 configurable.llm_provider
-               指定本节点使用的 LLM（deepseek / ollama）。
-               由 graph.ainvoke 调用方在请求级传入，节点不依赖全局状态。
+               指定本节点使用的 LLM。
 
     Returns:
-        dict: 部分状态更新字典，仅包含 {"plan": [...]}。
-              LangGraph 自动将此更新合并到全局 AgentState 中。
+        部分状态更新字典，含 plan / total_tokens / input_tokens /
+        output_tokens / current_llm。
     """
     query = state["user_query"]
     missing = state.get("missing_info", "")
     iteration = state.get("iteration", 0)
-
-    # 根据请求级 config 动态创建 LLM 实例
-    llm = get_llm(temperature=0, config=config)
 
     if missing and iteration > 0:
         prompt = f"""用户原始问题：{query}
@@ -53,11 +40,27 @@ async def planner(state: AgentState, config: RunnableConfig | None = None) -> di
     请为这个问题生成 3~5 个不同的搜索关键词，覆盖不同角度。
     只输出 JSON，格式：{{"plan": ["关键词1", "关键词2", ...]}}"""
 
-    # limited_llm_call 返回的已经是纯文本字符串，无需再提取 .content
-    content = await limited_llm_call(llm, prompt)
+    # 统一调用入口：自带备援 + Token 计数 + 并发限流
+    content, in_tok, out_tok, total_tok = await llm_call_with_fallback(prompt, config)
+
+    # 从 config 中读取当前实际使用的 provider（可能已被备援逻辑切换）
+    current_provider = (
+        config["configurable"].get("llm_provider", "ollama")
+        if config and "configurable" in config
+        else "ollama"
+    )
+
     # 使用鲁棒 JSON 解析器提取关键词列表
     parsed = await robust_json_parse(content)
+    # 从 AI 回复中提取 plan 字段，如果没有用原始查询作为 plan
     plan = parsed.get("plan", [query])
+    # dict.fromkeys() 是 Python 里唯一能保序的去重方法
     plan = list(dict.fromkeys(plan))[:5]
     print(f"Planner 输出原始内容: {content}")
-    return {"plan": plan}
+    return {
+        "plan": plan,
+        "total_tokens": total_tok,  # operator.add 自动累加
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "current_llm": current_provider,
+    }

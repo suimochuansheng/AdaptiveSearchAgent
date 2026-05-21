@@ -50,10 +50,29 @@ class Settings(BaseSettings):
     max_concurrent_llm_calls: int = 2  # 同时执行的 LLM 调用数（Semaphore）
     use_parallel_search: bool = True  # 是否启用并行搜索（用于性能对比）
 
+    # 双模型备援
+    llm_max_retries: int = 2  # 主模型失败后的重试次数（超过后切换到备援模型）
+    llm_fallback_enabled: bool = True  # 是否启用备援切换
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
     }
+    langchain_tracing_v2: bool | None = False  # 或者 str，按实际需要
+
+    # PostgreSQL 数据库连接配置（如果需要持久化）
+    postgres_user: str = "postgres"
+    postgres_password: str = ""
+    postgres_db: str = "langgraph_db"
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    # 连接池配置
+    postgres_pool_min_size: int = 5
+    postgres_pool_max_size: int = 20
+
+    class Config:
+        env_file = ".env"
+        extra = "ignore"
 
 
 # 全局单例，项目各处从此导入

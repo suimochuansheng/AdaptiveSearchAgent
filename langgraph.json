@@ -1,0 +1,7 @@
+{
+  "graphs": {
+    "search_agent": "./main.py:cli_graph"
+  },
+  "dependencies": ["."],
+  "env": ".env"
+}

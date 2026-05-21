@@ -7,7 +7,9 @@
 import asyncio
 import uuid
 
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, StateGraph
+from langgraph.types import Command, interrupt
 
 from config import settings
 from src.agents.evaluator import evaluator
@@ -38,8 +40,12 @@ async def test_planner() -> None:
         "human_approved": False,
         "task_id": "test",
         "total_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "current_llm": "ollama",
         "pending_keywords": [],
         "_batch_keywords": [],
+        "thread_id": "test",
     }
 
     print(f"输入查询: {state['user_query']}")
@@ -60,55 +66,10 @@ def should_continue(state: AgentState) -> str:
         or state["iteration"] >= settings.max_iterations
     ):
         # 记录本次查询收敛所需的迭代次数
-        metrics.record_iterations(state["iteration"])
+        # metrics.record_iterations(state["iteration"])
         return "writer"
     else:
         return "retry"
-
-
-def build_graph_serial():
-    """
-    构建 LangGraph 工作流（状态机执行图）-串行search_worker版本
-        planner -> search_worker (串行) -> evaluator -> (条件边) -> writer 或 planner
-    作用：定义 Agent 的执行节点、跳转逻辑、判断条件，最终编译成可运行的工作流
-    """
-    # 1. 创建 StateGraph 构建器，绑定共享状态类型 AgentState
-    # 所有节点之间共享、读写同一个 AgentState 数据
-    builder = StateGraph(AgentState)
-
-    # 2. 添加工作流节点（node = 一个执行函数/步骤）
-    # 参数：(节点名称, 节点对应的执行函数)
-    builder.add_node("planner", planner)  # 规划节点：生成搜索关键词
-    builder.add_node("search", search_worker)  # 搜索节点：执行联网搜索
-    builder.add_node("evaluator", evaluator)  # 评估节点：判断信息是否足够
-    builder.add_node("writer", writer)  # 写作节点：生成最终报告
-
-    # 3. 设置工作流【入口起点】
-    # 程序启动后第一个执行的节点：planner
-    builder.set_entry_point("planner")
-
-    # 4. 添加【固定顺序边】(无条件直接跳转)
-    # planner 执行完 → 自动跳转到 search
-    builder.add_edge("planner", "search")
-    # search 执行完 → 自动跳转到 evaluator
-    builder.add_edge("search", "evaluator")
-
-    # 5. 添加【条件边】(根据判断结果决定跳转到哪里)
-    # 这是循环重试的核心！
-    builder.add_conditional_edges(
-        source="evaluator",  # 来源节点：从 evaluator 出发
-        path=should_continue,  # 条件判断函数：返回 "retry" 或 "writer"
-        path_map={  # 映射关系：返回值 → 目标节点
-            "retry": "planner",  # 返回 retry → 回到 planner 重新搜索
-            "writer": "writer",  # 返回 writer → 进入最终报告生成
-        },
-    )
-
-    # 6. writer 执行完成 → 结束整个工作流（END 是 LangGraph 内置结束标记）
-    builder.add_edge("writer", END)
-
-    # 7. 编译生成可运行的工作流实例（类似编译成可执行程序）
-    return builder.compile()
 
 
 def should_continue_wave(state: AgentState) -> str:
@@ -125,17 +86,34 @@ def should_continue_wave(state: AgentState) -> str:
         state["confidence_score"] >= settings.confidence_threshold
         or state["iteration"] >= settings.max_iterations
     ):
-        # 记录本次查询的收敛迭代次数
-        metrics.record_iterations(state["iteration"])
-        return "writer"
+        return "human_approval"
     else:
-        # 即将重试，增加迭代计数
-        state["iteration"] = state.get("iteration", 0) + 1
         return "planner"
 
 
-def build_graph():
-    """构建 LangGraph 工作流（状态机执行图）-并行 search_worker 版本
+async def human_approval(state: AgentState) -> dict:
+    """人工审批节点：在生成报告前请求用户确认"""
+    # preview = state.get("final_report", "")[:200] if state.get("final_report") else "（暂无预览）"
+    search_count = len(state.get("search_results", []))
+    confidence = state.get("confidence_score", 0)
+    preview = f"已搜索 {search_count} 个关键词，置信度 {confidence:.0%}"
+
+    # 挂起图，等待用户输入
+    prompt = f"请审批是否生成最终报告？\n预览：{preview}\n输入 'yes' 批准，'no' 拒绝："
+    # interrupt() 是 LangGraph 官方提供的「中断当前节点执行、挂起整个图、等待外部输入后恢复执行」的专用函数
+    # interrupt() 是强制再写入一次（最终快照）
+    user_input = interrupt(prompt)
+    approved = user_input.strip().lower() == "yes"
+    return {"human_approved": approved}
+
+
+def after_approval(state: AgentState) -> str:
+    """审批后的路由：批准则 writer，否则结束"""
+    return "writer" if state.get("human_approved") else END  # type: ignore[no-any-return]
+
+
+def build_graph(checkpointer: AsyncSqliteSaver | None = None):
+    """构建 LangGraph 工作流（状态机执行图）-并行 search_worker 版本，包含人工审批节点
 
     图结构：
         planner → parallel_searcher → (条件边: Send 扇出到 search_worker
@@ -149,6 +127,9 @@ def build_graph():
         随后的 add_conditional_edges 调用 route_to_search_workers 路由函数，
         该函数返回 list[Send] 实现 search_worker 的并行扇出。
         所有 search_worker 完成后通过固定边汇聚到 evaluator。
+
+    Args:
+        checkpointer: 可选，AsyncSqliteSaver 实例，传入则启用 checkpoint 持久化。
     """
     builder = StateGraph(AgentState)
 
@@ -158,6 +139,7 @@ def build_graph():
     builder.add_node("search_worker", search_worker)
     builder.add_node("evaluator", evaluator)
     builder.add_node("writer", writer)
+    builder.add_node("human_approval", human_approval)  # 新增人工审批节点
 
     # 图结构
     builder.set_entry_point("planner")
@@ -182,17 +164,46 @@ def build_graph():
         {
             "parallel_searcher": "parallel_searcher",  # 继续下一批搜索
             "planner": "planner",  # 重试：回到 planner
-            "writer": "writer",  # 结束：生成报告
+            "human_approval": "human_approval",  # 指向人工审核节点
         },
     )
-    builder.add_edge("writer", END)
+    # 审批后的路由函数
+    builder.add_conditional_edges(
+        "human_approval",
+        after_approval,
+        {
+            "writer": "writer",
+            END: END,
+        },
+    )
+    graph = builder.compile(checkpointer=checkpointer, debug=True)
+    return graph
 
-    return builder.compile()
 
+async def run_agent(user_query: str) -> tuple[str, dict]:
+    """运行 Agent，返回 (最终报告, KPI 数据字典)。
 
-async def run_agent(user_query: str) -> str:
-    """运行 Agent，返回最终报告。"""
+    返回的 KPI 字典可直接传给 print_kpi_dashboard() 生成 CLI 指标表格。
+    """
+    import time as time_module
+
+    from src.utils.llm_utils import get_model_switch_count, reset_model_switch_count
+
     # 初始化全局状态，包含用户查询和其他必要字段
+    # 1. 生成唯一 thread_id，唯一的对话会话编号，不是Python 多线程、异步任务线程
+    thread_id = str(uuid.uuid4())
+
+    # 重置模型切换计数器（每个新会话从 0 开始）
+    reset_model_switch_count()
+
+    # 2. 定义 LangGraph 标准 config（和 main 里完全一致）
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "llm_provider": "ollama",  # 可改为 "deepseek"
+        }
+    }
+    # 3. 初始化全局状态
     initial_state: AgentState = {
         "user_query": user_query,
         "plan": [],
@@ -202,32 +213,86 @@ async def run_agent(user_query: str) -> str:
         "retry_keywords": [],
         "iteration": 0,
         "final_report": "",
-        "human_approved": True,  # 暂时自动批准
-        "task_id": str(uuid.uuid4()),
+        "human_approved": False,  # 等待人工审批
+        "thread_id": thread_id,  # 每次运行生成唯一线程 ID
+        "task_id": thread_id,  # 任务唯一标识，与 thread_id 一致
         "total_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "current_llm": "ollama",
         "pending_keywords": [],
         "_batch_keywords": [],
+        # 注意：state 内部不需要存 config，config 是传给 ainvoke 的参数
     }
-    # 构建 LangGraph 工作流
-    graph = build_graph()
-    # graph.ainvoke() → 异步非阻塞（必须搭配 await）
-    final_state = await graph.ainvoke(initial_state)
-    # 从最终状态中提取报告文本
-    report: str = final_state["final_report"]
-    return report
+    # 4. 构建图（带异步 SQLite checkpointer）并执行
+    import aiosqlite
+
+    #  perf_counter()系统最高精度计时器,记下开始时间，后续计算总耗时用
+    start_time = time_module.perf_counter()
+    # 注意：aiosqlite 连接需要在 async 环境中创建，因此放在 graph.ainvoke 外层
+    async with aiosqlite.connect("data/checkpoints.db") as conn:
+        # 兼容性修补：aiosqlite 0.22.x 缺少 is_alive()，langgraph 2.0.x 需要它
+        conn.is_alive = lambda: True  # type: ignore[method-assign, attr-defined]
+        # 中断前那一瞬间的最新状态会被 checkpointer 自动保存到 SQLite 数据库中，方便后续查询和恢复
+        checkpointer = AsyncSqliteSaver(conn)
+        # checkpointer传入 build_graph，启用图的持久化功能，图的执行状态会被自动保存到 SQLite 数据库中
+        graph = build_graph(checkpointer=checkpointer)
+
+        # 首次执行：运行到 human_approval 的 interrupt() 处自动挂起
+        final_state = await graph.ainvoke(initial_state, config)
+
+        # 检查 state 中是否有中断标记（Human-in-the-loop）
+        if "__interrupt__" in final_state:
+            user_input = input(">>> 请审批 (yes/no): ").strip()
+            # Command 是 LangGraph 官方专门用来「控制工作流执行、中断后恢复、传递任务指令」的专用数据结构
+            # Command 是控制指令，告诉langgraph从上面的interrupt处继续执行，resume=user_input 是把用户输入的审批结果传回去，供 human_approval 节点使用
+            # Command 恢复中断前那一瞬间的最新状态
+            final_state = await graph.ainvoke(Command(resume=user_input), config)
+    # 计算总耗时
+    elapsed = time_module.perf_counter() - start_time
+
+    # 5. 组装 KPI 数据（供 CLI 仪表盘使用）
+    kpi_data: dict = {
+        "total_tokens": final_state.get("total_tokens", 0),
+        "input_tokens": final_state.get("input_tokens", 0),
+        "output_tokens": final_state.get("output_tokens", 0),
+        "current_llm": final_state.get("current_llm", "ollama"),
+        "model_switches": get_model_switch_count(),
+        "thread_id": thread_id,
+        "elapsed_seconds": elapsed,
+        "human_approved": final_state.get("human_approved"),
+        "confidence_score": final_state.get("confidence_score", 0.0),
+    }
+
+    # 6. 返回报告 + KPI
+    return final_state["final_report"], kpi_data
 
 
 if __name__ == "__main__":
     # =============测试======================
     # asyncio.run(test_planner())
     # ======================单轮循环==========================
+    from src.utils.cli_report import print_kpi_dashboard
+
     query = input("请输入您的问题：").strip()
     if not query:
         query = "LangGraph 和 LangChain 的区别"
-    # 启动异步程序的「总开关」
-    report = asyncio.run(run_agent(query))
+    # 启动异步程序的「总开关」，同时获取报告和 KPI 数据
+    report, kpi_data = asyncio.run(run_agent(query))
     print("\n" + "=" * 60)
     print(report)
     print("\n" + "=" * 60)
     print(f"Metrics 数据已保存至: {metrics.data_path}")
-    # ================================================================
+    # 输出 CLI KPI 仪表盘
+    print_kpi_dashboard(kpi_data)
+    # ========================================================
+    # ========================================================
+
+
+# =============================================================================
+# LangGraph CLI 入口：供 langgraph dev / langgraph up / langgraph build 使用
+# =============================================================================
+# build_graph() 返回一个已编译的 StateGraph（含所有节点、边、条件路由）。
+# LangGraph CLI 读取此变量后，会用自己的 checkpointer（如 PostgresSaver）
+# 重新编译以适配 dev/生产环境的持久化需求，开发者无需手动传入 checkpointer。
+cli_graph = build_graph()
