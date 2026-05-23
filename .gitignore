@@ -36,6 +36,7 @@ env/
 # 环境变量
 .env
 .env.example
+frontend/.env
 
 # Poetry
 # 如果你希望锁定文件进入版本控制，可以删除下面这行；个人项目建议保留poetry.lock

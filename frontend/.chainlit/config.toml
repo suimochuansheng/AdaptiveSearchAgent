@@ -1,0 +1,10 @@
+[project]
+name = "AdaptiveSearchAgent"
+
+[UI]
+name = "自适应搜索代理"
+description = "多轮搜索 + AI 评估 + 人工审批"
+hide_cot = false
+
+[features]
+spontaneous_file_upload = false
