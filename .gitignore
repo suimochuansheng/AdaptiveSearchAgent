@@ -67,4 +67,6 @@ Thumbs.db
 # 文档文件
 documents/
 
- # 数据库
+# 前端
+.chainlit/
+frontend/.chainlit/
