@@ -61,3 +61,7 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+
+[tool.poetry.scripts] # 定义命令行脚本
+# 只需要运行 poetry run api 就能启动服务器
+api = "uvicorn api_main:app --reload --port 8000"

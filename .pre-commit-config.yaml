@@ -11,4 +11,9 @@ repos:
     hooks:
       - id: mypy
         args: [--ignore-missing-imports]
-        additional_dependencies: []
+        # mypy 的类型检查依赖于类型提示包（如 types-requests、types-redis 等），需要在 pre-commit 配置中添加这些依赖，以确保 mypy 能正确识别第三方库的类型信息。
+        additional_dependencies: [
+          'types-requests',
+          'types-redis',         # 👈 添加这一行，这是解决方案的核心
+          'types-python-dateutil',
+        ]

@@ -4,23 +4,34 @@ services:
     container_name: postgres_db
     restart: always
     environment:
-    # 注意docker-compose.yml文件需要与.env文件在同一目录,才能正确加载环境变量
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      - "5432:5432"                 # 可选：宿主机访问数据库（调试用）
     volumes:
-      # 将容器内的数据目录映射到 WSL 本地目录，确保数据持久化
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      # 健康检查，确保数据库启动成功
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-# 命名卷
+  redis:
+    image: redis:7-alpine
+    container_name: redis_cache
+    restart: always
+    ports:
+      - "16379:6379"                 # 16379 避免 Docker Desktop 预占的 6000-6420 范围
+    volumes:
+      - redisdata:/data
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
 volumes:
   pgdata:
-
+  redisdata:

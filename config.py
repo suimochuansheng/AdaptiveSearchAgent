@@ -60,19 +60,16 @@ class Settings(BaseSettings):
     }
     langchain_tracing_v2: bool | None = False  # 或者 str，按实际需要
 
-    # PostgreSQL 数据库连接配置（如果需要持久化）
-    postgres_user: str = "postgres"
-    postgres_password: str = ""
-    postgres_db: str = "langgraph_db"
-    postgres_host: str = "localhost"
-    postgres_port: int = 5432
-    # 连接池配置
-    postgres_pool_min_size: int = 5
-    postgres_pool_max_size: int = 20
+    # Redis 连接配置（分布式锁、缓存）
+    REDIS_URL: str = ""
+    REDIS_PASSWORD: str = ""
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    # PostgreSQL 数据库连接配置（Checkpointer 持久化 + 任务状态管理）
+    postgres_user: str = ""
+    postgres_password: str = ""
+    postgres_db: str = ""
+    postgres_host: str = ""
+    postgres_port: int = 5432
 
 
 # 全局单例，项目各处从此导入
