@@ -1,6 +1,6 @@
 {
   "graphs": {
-    "search_agent": "./main.py:cli_graph"
+    "search_agent": "./src/graph_factory.py:get_graph_for_studio"
   },
   "dependencies": ["."],
   "env": ".env"

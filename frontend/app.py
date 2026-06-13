@@ -1,43 +1,66 @@
+"""
+Chainlit 前端入口 — 自适应搜索助手。
+
+职责：
+- 用户身份识别（AskUserMessage）
+- 会话中断恢复（行内 AskActionMessage，弱感知）
+- SSE 流式消费（6 种事件类型）
+- 多次中断审批循环（Human-in-the-Loop）
+"""
+
 import json
 import logging
 import os
 from contextlib import suppress
+from typing import Any
 
 import chainlit as cl
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()  # 加载 frontend/.env
-FASTAPI_BASE_URL = os.getenv("FASTAPI_BASE_URL", "http://localhost:8000")
-CHAINLIT_PORT = int(os.getenv("CHAINLIT_PORT", 8001))
+# ---------------------------测试用的私有化函数允许外部调用---------------------------
+__all__ = ["_stream_agent_with_interrupt"]
 
-# 配置日志（可自定义）
+# ── 环境 & 配置 ──────────────────────────────────────────────
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+FASTAPI_BASE_URL = os.getenv("FASTAPI_BASE_URL", "http://localhost:8000")
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# =============================================================================
-# 公共工具函数
-# =============================================================================
+# ── 开发开关 ────────────────────────────────────────────────
+DEVELOPER_MODE = True  # True=跳过名字输入+锁定 thread_id / False=正式多用户模式
+
+# ── 会话键名常量 ─────────────────────────────────────────────
+SESSION_THREAD_ID = "thread_id"
+SESSION_USER_NAME = "user_name"
+SESSION_PENDING_INTERRUPT = "pending_interrupt"  # 标记有未处理的中断
 
 
-async def _handle_sse_event(
-    event_type: str,
-    data: dict,
-    msg: cl.Message,
-) -> bool:
-    """处理单个 SSE 事件，返回 True 表示流已结束（应 break/return）。
+# ═══════════════════════════════════════════════════════════════
+# SSE 事件处理
+# ═══════════════════════════════════════════════════════════════
 
-    抽取为公共函数，避免 on_message 和 resume_agent 中重复代码。
-    """
+
+async def _handle_sse_event(event_type: str, data: dict, msg: cl.Message) -> bool:
+    """处理单个 SSE 事件。返回 True = 流结束（应 break）。"""
+
     if event_type == "status":
-        # 中间状态：显示置信度变化和迭代进度
         conf = data.get("confidence", 0.0)
         it = data.get("iteration", 0)
         missing = data.get("missing_info", "")
-        lines = [f"\n\n🔄 **第 {it} 轮评估** — 置信度 {conf:.0%}"]
+        parts = [f"\n🔄 **第 {it} 轮评估** — 置信度 {conf:.0%}"]
         if missing:
-            lines.append(f"  ⚠️ 缺失信息：{missing}")
-        await msg.stream_token("\n".join(lines))
+            parts.append(f"  ⚠️ 缺失信息：{missing}")
+        await msg.stream_token("\n".join(parts))
+
+    elif event_type == "search_result":
+        kw = data.get("keyword", "")
+        content = data.get("content", "")
+        if kw and content:
+            await msg.stream_token(f"\n🔍 **「{kw}」** → {content}\n")
+        else:
+            logger.warning("search_result 跳过显示: kw=%r content_empty=%s", kw, not content)
 
     elif event_type == "final":
         if data.get("content"):
@@ -46,8 +69,8 @@ async def _handle_sse_event(
 
     elif event_type == "kpi":
         kpi = data.get("data", {})
-        kpi_text = (
-            f"\n\n---\n📊 **执行统计**\n"
+        await msg.stream_token(
+            f"\n---\n📊 **执行统计**\n"
             f"- 模型：{kpi.get('current_llm', '?')}\n"
             f"- 输入 Token：{kpi.get('input_tokens', 0):,}\n"
             f"- 输出 Token：{kpi.get('output_tokens', 0):,}\n"
@@ -56,149 +79,17 @@ async def _handle_sse_event(
             f"- 模型切换：{kpi.get('model_switches', 0)} 次\n"
             f"- 耗时：{kpi.get('elapsed_seconds', 0):.1f}s\n"
         )
-        await msg.stream_token(kpi_text)
 
     elif event_type == "error":
-        await msg.stream_token(f"\n\n❌ **错误**：{data.get('message', '未知错误')}")
-        return True  # 异常结束
+        await msg.stream_token(f"\n❌ **错误**：{data.get('message', '未知错误')}")
+        return True
 
-    return False  # 继续读下一个事件
-
-
-async def _stream_agent(
-    *,
-    thread_id: str,
-    message: str | None,
-    resume_value: str | None,
-    msg: cl.Message,
-    client: httpx.AsyncClient,
-) -> None:
-    """向 /chat/stream 发起流式请求，并将 SSE 事件逐条写入 msg。
-
-    统一了首次执行和恢复执行两种场景的 HTTP 流消费逻辑。
-    """
-    payload: dict = {"thread_id": thread_id}
-    if resume_value is not None:
-        payload["resume_value"] = resume_value
-        payload["message"] = None
-    else:
-        payload["message"] = message or ""
-
-    async with client.stream("POST", f"{FASTAPI_BASE_URL}/chat/stream", json=payload) as response:
-        response.raise_for_status()
-        async for line in response.aiter_lines():
-            if not line.startswith("data: "):
-                continue
-            try:
-                event_data = json.loads(line[6:])
-            except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON line: {line}")
-                continue
-
-            event_type = event_data.get("type", "")
-            should_stop = await _handle_sse_event(event_type, event_data, msg)
-            if should_stop:
-                break
-
-    await msg.update()
+    return False
 
 
-# =============================================================================
-# Chainlit 生命周期
-# =============================================================================
-
-
-@cl.on_chat_start
-async def start():
-    """会话开始时：初始化 thread_id，检查是否有中断的会话。
-
-    三种路径：
-    - idle / 无记录  → 正常开始，等用户发消息
-    - interrupted    → 弹窗让用户选择"恢复"还是"新对话"
-    """
-    thread_id = cl.context.session.id
-    cl.user_session.set("thread_id", thread_id)
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            resp = await client.get(f"{FASTAPI_BASE_URL}/status/{thread_id}")
-        except Exception as e:
-            logger.error(f"Check status failed: {e}")
-            await cl.Message(content="⚠️ 无法连接后端服务，请确认后端已启动").send()
-            return
-
-    if resp.status_code != 200:
-        await cl.Message(content="✅ 欢迎使用 AdaptiveSearchAgent！请输入你的问题。").send()
-        return
-
-    status = resp.json().get("status", "idle")
-    if status != "interrupted":
-        await cl.Message(content="✅ 欢迎使用 AdaptiveSearchAgent！请输入你的问题。").send()
-        return
-
-    # ── 状态为 interrupted ────────────────────────────────────
-    actions = [
-        cl.Action(name="resume", value="resume", label="✅ 恢复上一次对话"),
-        cl.Action(name="new", value="new", label="🆕 开始新对话"),
-    ]
-    res = await cl.AskActionMessage(
-        content="🔔 检测到有未完成的会话（等待审批中），是否继续？",
-        actions=actions,
-    ).send()
-
-    choice = res.get("value")
-
-    if choice == "resume":
-        # ── 路径 A：立即恢复，不需要等用户额外发消息 ───────────
-        status_msg = cl.Message(content="⏳ 正在恢复之前的对话，请稍候...")
-        await status_msg.send()
-
-        msg = cl.Message(content="")
-        await msg.send()
-
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-            try:
-                await _stream_agent(
-                    thread_id=thread_id,
-                    message=None,
-                    resume_value="yes",
-                    msg=msg,
-                    client=client,
-                )
-            except httpx.HTTPStatusError as e:
-                await msg.update(content=f"❌ HTTP {e.response.status_code}")
-            except httpx.TimeoutException:
-                await msg.update(content="❌ 请求超时，请重试")
-            except Exception as e:
-                logger.exception("Unexpected error during resume")
-                await msg.update(content=f"❌ 恢复失败：{str(e)}")
-
-    else:
-        # ── 路径 B：用户选择新对话，发 resume_value="no" 关闭旧会话 ──
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as close_client:
-            with suppress(Exception):
-                await close_client.post(
-                    f"{FASTAPI_BASE_URL}/chat/stream",
-                    json={"thread_id": thread_id, "resume_value": "no", "message": None},
-                )
-        await cl.Message(content="✅ 已关闭上次会话，请输入新的问题开始对话。").send()
-
-
-# =============================================================================
-# 中断审批 —— 在 SSE 流中处理
-# =============================================================================
-
-# 说明：审批交互不在此文件中作为独立函数暴露，而是在 _handle_sse_event
-# 的调用方（当前为 on_message 的 _stream_agent 调用）中，
-# on_message 在收到 interrupt 事件后，由业务层处理 AskActionMessage 弹窗，
-# 然后调用 _stream_agent(resume_value="yes"/"no") 恢复。
-#
-# 因此 on_message 需要能感知 interrupt 事件 —— 当前设计中
-# _handle_sse_event 不处理 interrupt 类型，
-# 需要由 _stream_agent 调用方自行处理。
-
-# 为了支持中断审批，我们对 _stream_agent 做一点改造：
-# 让它返回"是否因 interrupt 而暂停"，由调用方决定后续动作。
+# ═══════════════════════════════════════════════════════════════
+# 流式请求（中断感知版本）
+# ═══════════════════════════════════════════════════════════════
 
 
 async def _stream_agent_with_interrupt(
@@ -209,14 +100,16 @@ async def _stream_agent_with_interrupt(
     msg: cl.Message,
     client: httpx.AsyncClient,
 ) -> str | None:
-    """增强版 _stream_agent，返回值表示流结束原因。
+    """向 /chat/stream 发起流式请求，遇 interrupt 事件时弹出审批卡片。
 
     Returns:
-        None          — 正常结束（final / kpi 后 break）
-        "yes" / "no"  — 用户选择了审批结果（需要调用方发起恢复请求）
-        "error"       — 发生错误
+        None  — 流正常结束或错误结束
+        "yes" — 用户点击批准（需外层 while 循环继续恢复）
+        "no"  — 用户点击拒绝（需外层 while 循环结束会话）
     """
-    payload: dict = {"thread_id": thread_id}
+
+    # ── 构造请求体 ────────────────────────────────────────
+    payload: dict[str, Any] = {"thread_id": thread_id}
     if resume_value is not None:
         payload["resume_value"] = resume_value
         payload["message"] = None
@@ -225,63 +118,247 @@ async def _stream_agent_with_interrupt(
 
     async with client.stream("POST", f"{FASTAPI_BASE_URL}/chat/stream", json=payload) as response:
         response.raise_for_status()
+
         async for line in response.aiter_lines():
             if not line.startswith("data: "):
                 continue
             try:
                 event_data = json.loads(line[6:])
             except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON line: {line}")
+                logger.warning("无效 JSON 行: %s", line)
                 continue
 
             event_type = event_data.get("type", "")
 
-            # ── interrupt 特殊处理：弹窗获取用户选择 ──
+            # 中断事件：弹出行内审批卡片
             if event_type == "interrupt":
                 question = event_data.get("question", "需要您的批准")
-                # 显示等待状态
-                wait_msg = cl.Message(content=f"⏳ **等待审批**：{question}")
+                cl.user_session.set(SESSION_PENDING_INTERRUPT, True)
+
+                wait_msg = cl.Message(content=f"⏳ 等待审批：{question}")
                 await wait_msg.send()
 
-                actions = [
-                    cl.Action(name="approve", value="yes", label="✅ 批准"),  # type: ignore[call-arg]
-                    cl.Action(name="reject", value="no", label="❌ 拒绝"),  # type: ignore[call-arg]
-                ]
-                res = await cl.AskActionMessage(content=f"**{question}**", actions=actions).send()
-                choice: str = str(res.get("value", "no")) if res else "no"
-                await wait_msg.update(  # type: ignore[call-arg]
-                    content=f"✅ 已选择：{'批准' if choice == 'yes' else '拒绝'}，继续执行..."
-                )
-                return choice  # 返回给调用方，调用方负责发起恢复请求
+                res = await cl.AskActionMessage(
+                    content=f"**{question}**",
+                    actions=[
+                        cl.Action(
+                            name="approve",
+                            value="yes",
+                            label="✅ 批准继续",
+                            payload={"action": "approve"},
+                        ),
+                        cl.Action(
+                            name="reject", value="no", label="❌ 放弃", payload={"action": "reject"}
+                        ),
+                    ],
+                ).send()
 
-            # ── 其余事件：统一处理 ──
+                choice: str = str(getattr(res, "value", "no")) if res else "no"
+                wait_msg.content = f"{'✅ 已批准' if choice == 'yes' else '❌ 已放弃'}，继续执行..."
+                await wait_msg.update()
+                cl.user_session.set(SESSION_PENDING_INTERRUPT, False)
+                return choice
+
+            # 普通事件：委托给通用处理器
             should_stop = await _handle_sse_event(event_type, event_data, msg)
             if should_stop:
                 await msg.update()
-                return None  # 正常结束
+                return None
 
     await msg.update()
     return None
 
 
-@cl.on_message
-async def on_message(message: cl.Message):
-    """处理用户消息 —— 支持首次搜索 + 中断审批循环。
+# ═══════════════════════════════════════════════════════════════
+# Chainlit 生命周期 — on_chat_start
+# ═══════════════════════════════════════════════════════════════
 
-    流程：
-    1. 首次执行：发送用户消息 → 图执行 → 可能遇到 interrupt
-    2. 遇到 interrupt → 弹窗审批 → 自动发起恢复请求
-    3. 恢复执行 → 可能再次 interrupt（理论上不会，但支持）
-    4. 直到 final/kpi/error 结束
-    """
-    thread_id: str = cl.user_session.get("thread_id")  # type: ignore[assignment]
+
+async def _check_backend_status(thread_id: str) -> dict:
+    """静默查询后端会话状态。返回 {"status": "idle"|...} 或 {"error": str}。"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{FASTAPI_BASE_URL}/status/{thread_id}")
+        if resp.status_code == 200:
+            data: dict[str, Any] = resp.json()
+            return data
+        return {"status": "idle", "error": f"HTTP {resp.status_code}"}
+    except Exception as exc:
+        logger.warning("后端状态查询失败: %s", exc)
+        return {"status": "idle", "error": str(exc)}
+
+
+async def _send_welcome(user_name: str) -> None:
+    """发送欢迎消息。"""
+    await cl.Message(
+        content=(
+            f"👋 欢迎，**{user_name}**！\n\n"
+            "我是自适应搜索助手，基于 LangGraph 构建。\n"
+            "输入你的问题，我会自动搜索、评估并生成报告。"
+        )
+    ).send()
+
+
+async def _handle_interrupted_session(thread_id: str) -> None:
+    """处理中断会话：行内卡片询问用户意图。"""
+
+    res = await cl.AskActionMessage(
+        content=(
+            "🔔 **检测到上一次研讨尚未完成。**\n\n"
+            "可能是网络中断或你上次关闭了页面。你想怎么处理？"
+        ),
+        actions=[
+            cl.Action(
+                name="resume_interrupted",
+                value="resume",
+                label="✅ 恢复上一次研讨",
+                description="从中断处继续执行",
+                payload={"action": "resume"},
+            ),
+            cl.Action(
+                name="new_interrupted",
+                value="new",
+                label="🆕 开启全新研讨",
+                description="放弃上一次未完成的任务",
+                payload={"action": "new"},
+            ),
+        ],
+        timeout=120,
+    ).send()
+
+    # Chainlit 2.x 返回类型可能是 Action / dict / str，多路径探测
+    raw = repr(res)
+    logger.info("中断卡片返回值: type=%s repr=%s", type(res).__name__, raw)
+
+    # 尝试多种取值路径
+    choice: str | None = None
+    if res is None:
+        choice = None
+    elif isinstance(res, str):
+        choice = res
+    elif isinstance(res, dict):
+        choice = res.get("value") or res.get("name")
+    elif hasattr(res, "value"):
+        choice = getattr(res, "value", None)
+
+    logger.info("解析后的 choice=%s", choice)
+
+    if choice is None:
+        await _close_old_session(thread_id)
+        await cl.Message(content="⏰ 操作超时，已自动开启全新研讨。").send()
+    elif choice in ("resume", "resume_interrupted"):
+        await _resume_interrupted_session(thread_id)
+    else:
+        await _close_old_session(thread_id)
+        await cl.Message(content="✅ 已关闭上次研讨，开始新的对话。").send()
+
+
+async def _close_old_session(thread_id: str) -> None:
+    """通知后端关闭中断的旧会话。"""
+    with suppress(Exception):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await client.post(
+                f"{FASTAPI_BASE_URL}/chat/stream",
+                json={"thread_id": thread_id, "resume_value": "no", "message": None},
+            )
+    logger.info("已关闭中断会话: thread_id=%s", thread_id)
+
+
+async def _resume_interrupted_session(thread_id: str) -> None:
+    """恢复被中断的会话：发送 resume_value=yes 并流式输出后续结果。"""
+
+    status_msg = cl.Message(content="⏳ 正在恢复上一次研讨，请稍候...")
+    await status_msg.send()
 
     msg = cl.Message(content="")
     await msg.send()
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
         try:
-            # ── 首次执行 ──
+            await _stream_agent_with_interrupt(
+                thread_id=thread_id,
+                message=None,
+                resume_value="yes",
+                msg=msg,
+                client=client,
+            )
+            status_msg.content = "✅ 上一次研讨已恢复完成。"
+            await status_msg.update()
+
+        except httpx.HTTPStatusError as exc:
+            msg.content = f"❌ 后端错误 (HTTP {exc.response.status_code})"
+            await msg.update()
+            logger.exception("恢复中断会话时后端报错")
+        except httpx.TimeoutException:
+            msg.content = "❌ 恢复请求超时，请重试"
+            await msg.update()
+            logger.exception("恢复中断会话超时")
+        except Exception as exc:
+            msg.content = f"❌ 恢复失败：{exc}"
+            await msg.update()
+            logger.exception("恢复中断会话时发生未知错误")
+
+
+@cl.on_chat_start
+async def on_chat_start() -> None:
+    """会话启动：身份识别 → 静默查后端状态 → 仅 interrupted 时出行内卡片。"""
+
+    # ── 第一步：确定用户身份和 thread_id ────────────────────
+    if DEVELOPER_MODE:
+        user_name = "developer"
+        thread_id = "developer_workspace"  # 锁定，刷新 100% 命中同一会话
+    else:
+        name_res = await cl.AskUserMessage(
+            content="🍵 研讨室一号，请问阁下尊姓大名？", timeout=60
+        ).send()
+        user_name = (
+            name_res["output"].strip()
+            if name_res and name_res.get("output", "").strip()
+            else "访客"
+        )
+        thread_id = f"{user_name}-{cl.context.session.id[:8]}"
+
+    cl.user_session.set(SESSION_USER_NAME, user_name)
+    cl.user_session.set(SESSION_THREAD_ID, thread_id)
+    cl.user_session.set(SESSION_PENDING_INTERRUPT, False)
+
+    logger.info(
+        "会话启动: user=%s, thread_id=%s, dev_mode=%s", user_name, thread_id, DEVELOPER_MODE
+    )
+
+    # ── 第二步：静默检查后端状态 ────────────────────────────
+    status_data = await _check_backend_status(thread_id)
+    status = status_data.get("status", "idle")
+    logger.info("会话状态: thread_id=%s, status=%s", thread_id, status)
+
+    # ── 第三步：根据状态分流 ─────────────────────────────────
+    if status == "interrupted":
+        await _handle_interrupted_session(thread_id)
+    else:
+        # idle / completed / failed / running(僵尸) → 正常欢迎
+        await _send_welcome(user_name)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 用户消息入口（含多次中断循环）
+# ═══════════════════════════════════════════════════════════════
+
+
+@cl.on_message
+async def on_message(message: cl.Message) -> None:
+    """用户发送消息时触发。支持首次搜索 + 多次中断审批循环。"""
+
+    thread_id: str = cl.user_session.get(SESSION_THREAD_ID)
+    if not thread_id:
+        await cl.Message(content="❌ 会话未初始化，请刷新页面。").send()
+        return
+
+    msg = cl.Message(content="")
+    await msg.send()
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+        try:
+            # 第一次请求
             result = await _stream_agent_with_interrupt(
                 thread_id=thread_id,
                 message=message.content,
@@ -290,7 +367,7 @@ async def on_message(message: cl.Message):
                 client=client,
             )
 
-            # ── 循环处理中断（用户可能多次审批） ──
+            # 循环处理多次中断（Agent 可能在多轮搜索中都触发审批）
             while result in ("yes", "no"):
                 result = await _stream_agent_with_interrupt(
                     thread_id=thread_id,
@@ -300,17 +377,26 @@ async def on_message(message: cl.Message):
                     client=client,
                 )
 
-        except httpx.HTTPStatusError as e:
-            await msg.update(content=f"❌ HTTP {e.response.status_code}: {e.response.text}")  # type: ignore[call-arg]
+        except httpx.HTTPStatusError as exc:
+            msg.content = f"❌ 后端错误 (HTTP {exc.response.status_code})"
+            await msg.update()
+            logger.exception("on_message 后端错误")
         except httpx.TimeoutException:
-            await msg.update(content="❌ 请求超时，请重试")  # type: ignore[call-arg]
-        except Exception as e:
-            logger.exception("Unexpected error in on_message")
-            await msg.update(content=f"❌ 内部错误：{str(e)}")  # type: ignore[call-arg]
+            msg.content = "❌ 请求超时，请重试"
+            await msg.update()
+            logger.exception("on_message 超时")
+        except Exception as exc:
+            msg.content = f"❌ 服务异常：{exc}"
+            await msg.update()
+            logger.exception("on_message 未知错误")
+
+
+# ═══════════════════════════════════════════════════════════════
+# 用户主动停止
+# ═══════════════════════════════════════════════════════════════
 
 
 @cl.on_stop
-async def on_stop():
-    """用户主动停止会话时，可以通知后端（可选）"""
-    thread_id = cl.user_session.get("thread_id")
-    logger.info(f"Session {thread_id} stopped by user")
+async def on_stop() -> None:
+    thread_id = cl.user_session.get(SESSION_THREAD_ID)
+    logger.info("用户主动停止: thread_id=%s", thread_id)

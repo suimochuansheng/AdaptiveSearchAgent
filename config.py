@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     postgres_host: str = ""
     postgres_port: int = 5432
 
+    # 新增字段，与 .env 中的变量名一致
+    fastapi_base_url: str = "http://localhost:8000"  # 后端基础 URL
+    chainlit_port: int = 8001  # Chainlit 前端端口
+
 
 # 全局单例，项目各处从此导入
 settings = Settings()

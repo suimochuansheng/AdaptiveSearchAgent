@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="zh-CN" style="">
+<head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>自适应搜索助手 - 意境美学全效版</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,typography,container-queries"></script>
+<style data-purpose="theme-variables">
+    :root {
+      /* Modernist (Default) Theme */
+      --bg-sidebar: #f1efeb;
+      --bg-main: #faf9f6;
+      --text-main: #1a1a1a;
+      --text-muted: #666666;
+      --accent-active: #ef4444; /* Red dot */
+      --border-light: #e5e5e0;
+      --item-hover: #e5e5e0;
+      --user-msg-bg: #e8e6e1;
+      --think-bg: #f4f3f0;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+
+    [data-theme="shanshui"] {
+      /* Shanshui (Ink Wash) Theme */
+      --bg-sidebar: #e8e4d9;
+      --bg-main: #f2efe9;
+      --text-main: #2b2b2b;
+      --text-muted: #5c5c5c;
+      --accent-active: #8b0000;
+      --border-light: #d1cbbb;
+      --item-hover: #dcd7c9;
+      --user-msg-bg: #dcd7c9;
+      --think-bg: #ebe8e1;
+      --font-sans: "Kaiti SC", STKaiti, "AR PL UKai CN", "AR PL UKai HK", "AR PL UKai TW", KaiTi, KaiTi_GB2312, serif;
+    }
+
+    [data-theme="celadon"] {
+      /* Celadon (Ru Ware) Theme */
+      --bg-sidebar: #e1e8e5;
+      --bg-main: #edf2f0;
+      --text-main: #2d4a44;
+      --text-muted: #5a7d77;
+      --accent-active: #3b82f6;
+      --border-light: #c4d4cf;
+      --item-hover: #d1e0db;
+      --user-msg-bg: #d1e0db;
+      --think-bg: #e3ebe8;
+      --font-sans: "Songti SC", STSong, "AR PL New Sung", "AR PL SungtiL GB", NSimSun, SimSun, serif;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      color: var(--text-main);
+      background-color: var(--bg-main);
+      transition: all 0.3s ease;
+    }
+
+    .bg-sidebar { background-color: var(--bg-sidebar); }
+    .bg-main { background-color: var(--bg-main); }
+    .text-main { color: var(--text-main); }
+    .text-muted { color: var(--text-muted); }
+    .border-light { border-color: var(--border-light); }
+    .hover-item:hover { background-color: var(--item-hover); }
+    .bg-user-msg { background-color: var(--user-msg-bg); }
+    .bg-think { background-color: var(--think-bg); }
+    .text-accent { color: var(--accent-active); }
+    .bg-accent { background-color: var(--accent-active); }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background-color: var(--border-light);
+      border-radius: 10px;
+    }
+
+    /* Details Marker Animation */
+    details > summary {
+      list-style: none;
+    }
+    details > summary::-webkit-details-marker {
+      display: none;
+    }
+    details[open] summary ~ * {
+      animation: sweep .3s ease-in-out;
+    }
+    @keyframes sweep {
+      0%    {opacity: 0; transform: translateY(-10px)}
+      100%  {opacity: 1; transform: translateY(0)}
+    }
+
+    /* Override prose text color in themes */
+    .prose p, .prose li, .prose h1, .prose h2, .prose h3, .prose h4, .prose strong {
+      color: var(--text-main) !important;
+    }
+    .prose strong {
+      color: var(--accent-active) !important;
+      font-weight: 700 !important;
+    }
+    .prose hr {
+      border-color: var(--border-light) !important;
+      opacity: 0.5;
+    }
+  </style>
+</head>
+<body class="h-screen w-screen flex overflow-hidden antialiased" data-theme="modernist">
+
+<!-- BEGIN: Sidebar -->
+<aside class="w-64 flex-shrink-0 bg-sidebar border-r border-light flex flex-col transition-colors duration-300">
+<!-- Header/Logo -->
+<div class="p-6">
+<h1 class="text-xl font-bold tracking-wide text-main" id="sidebarTitle">现代人文助手</h1>
+</div>
+<!-- New Chat Button -->
+<div class="px-4 mb-4">
+<button class="w-full py-2.5 px-4 bg-white border border-light rounded-lg shadow-sm text-sm font-medium hover:bg-gray-50 transition-colors flex items-center justify-center space-x-2 text-main" id="newChatBtn">
+<span class="">开启新研讨</span>
+</button>
+</div>
+<!-- History List -->
+<nav class="flex-1 overflow-y-auto px-2 space-y-1" id="history-container">
+<a class="block px-3 py-2.5 rounded-md bg-white border border-light text-sm font-medium text-main shadow-sm" href="#">
+        探讨：现代 AI 搜索的本质
+      </a>
+</nav>
+<!-- User Profile -->
+<div class="p-4 border-t border-light flex items-center space-x-3 cursor-pointer hover:bg-black/5" id="userProfileBtn">
+<div class="w-10 h-10 rounded-full bg-[#2c3e50] flex items-center justify-center text-white font-bold text-lg flex-shrink-0 transition-all duration-300" id="user-avatar">
+        李
+      </div>
+<div class="overflow-hidden">
+<p class="text-sm font-medium text-main truncate" id="displayUsername">李清照 (研究员)</p>
+<p class="text-xs text-muted truncate" id="displayRole">研讨室一号成员</p>
+</div>
+</div>
+</aside>
+<!-- END: Sidebar -->
+
+<!-- BEGIN: Main Content Area -->
+<main class="flex-1 flex flex-col min-w-0 bg-main transition-colors duration-300 relative chat-container">
+<!-- Top Bar -->
+<header class="h-16 border-b border-light flex items-center justify-between px-6 flex-shrink-0 absolute top-0 left-0 right-0 z-10 bg-main/80 backdrop-blur-sm">
+<div class="flex items-center space-x-2 text-sm text-muted">
+<span class="w-2 h-2 rounded-full bg-accent animate-pulse" id="status-dot"></span>
+<span class="" id="connection-status">协同引擎在线</span>
+</div>
+<button class="px-4 py-1.5 rounded-full border border-light bg-sidebar text-sm text-main hover:bg-white transition-colors flex items-center space-x-1 shadow-sm" id="theme-toggle">
+<span id="theme-label" class="">现代主义</span>
+<span class="">🌙</span>
+</button>
+</header>
+
+<!-- 恢复横幅 (默认隐藏) -->
+<div id="recovery-banner" class="bg-amber-100/90 border-b border-amber-200 text-amber-800 px-6 py-2.5 text-sm flex justify-between items-center z-10 absolute top-16 left-0 right-0" style="display: none;">
+  <span>⚠️ 检测到上一次未完成的人工审批会话，是否继续？</span>
+  <div class="flex gap-2">
+    <button id="recovery-approve" class="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1 rounded text-xs transition-colors">✅ 批准继续</button>
+    <button id="recovery-reject" class="bg-amber-200 hover:bg-amber-300 text-amber-900 px-3 py-1 rounded text-xs transition-colors">❌ 放弃</button>
+  </div>
+</div>
+
+<!-- Chat Area -->
+<div class="flex-1 overflow-y-auto p-6 pt-24 pb-32" id="chat-area">
+<div class="max-w-4xl mx-auto space-y-8" id="chat-messages-wrap">
+<!-- Welcome Message -->
+<div class="flex flex-col gap-4">
+    <article class="prose prose-slate max-w-none text-main leading-relaxed">
+        <p>你好！我是自适应搜索助手。我能帮助你收集最新信息、生成报告，并在必要时与你确认关键步骤。请问需要查找什么内容？</p>
+    </article>
+</div>
+</div>
+</div>
+
+<!-- Input Area -->
+<div class="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-main via-main to-transparent">
+<div class="max-w-4xl mx-auto">
+<div class="relative bg-white border border-light rounded-xl shadow-lg flex items-end">
+<textarea class="w-full bg-transparent border-0 focus:ring-0 resize-none py-4 pl-4 pr-12 text-main text-[15px] max-h-32 min-h-[60px]" id="message-input" placeholder="输入您想研讨的问题..." rows="1"></textarea>
+<button class="absolute right-3 bottom-3 p-2 text-muted hover:text-main transition-colors" id="send-button">
+<svg class="w-5 h-5 transform rotate-45" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</button>
+</div>
+<p class="text-center text-xs text-muted mt-3">内容由 AI 生成，请注意甄别。</p>
+</div>
+</div>
+</main>
+<!-- END: Main Content Area -->
+
+<!-- 中断审批模态框 -->
+<div id="interrupt-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" style="display: none;">
+    <div class="bg-white border border-light rounded-2xl max-w-md w-[90%] p-6 shadow-xl">
+        <h3 class="text-lg font-bold text-accent mb-2">✋ 需要您的确认</h3>
+        <p id="interrupt-question" class="text-sm text-muted leading-relaxed mb-6">搜索结果置信度低，是否生成报告？</p>
+        <div class="flex justify-end gap-3">
+            <button id="modal-reject" class="px-4 py-2 border border-light rounded-xl text-xs font-medium hover:bg-black/5 text-muted transition-colors">❌ 拒绝</button>
+            <button id="modal-approve" class="px-4 py-2 bg-accent text-white rounded-xl text-xs font-medium hover:brightness-95 transition-all">✅ 批准继续</button>
+        </div>
+    </div>
+</div>
+
+<!-- 模拟账户登录模态框 -->
+<div id="login-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" style="display: none;">
+    <div class="bg-white border border-light rounded-2xl max-w-sm w-[90%] p-6 shadow-xl">
+        <h3 class="text-lg font-bold text-main mb-2">🔑 登录您的账户</h3>
+        <p class="text-sm text-muted mb-4">请输入模拟账号名称：</p>
+        <input type="text" id="username-input" class="w-full p-2.5 text-sm bg-main border border-light rounded-xl mb-4 text-main" placeholder="用户名">
+        <div class="flex justify-end gap-3">
+            <button id="login-cancel" class="px-4 py-2 border border-light rounded-xl text-xs hover:bg-black/5 text-muted transition-colors">取消</button>
+            <button id="login-confirm" class="px-4 py-2 bg-accent text-white rounded-xl text-xs hover:brightness-95 transition-all">登录</button>
+        </div>
+    </div>
+</div>
+
+<!-- BEGIN: Backend SSE Integration and Theme Script -->
+<script data-purpose="theme-switcher">
+    // ---------- 配置 & 状态管理 ----------
+    const API_BASE = 'http://localhost:8000'; // 后端 FastAPI 地址
+    let currentThreadId = null;
+    let isProcessing = false;
+    let currentAssistantMsgGroup = null; 
+    let pendingInterruptResolve = null;
+
+    // ---------- 主题列表 ----------
+    const themes = [
+      { id: 'modernist', label: '现代主义', icon: '🌙', avatarClass: 'rounded-full', title: '现代人文助手' },
+      { id: 'shanshui', label: '山水墨意', icon: '⛰️', avatarClass: 'rounded-sm', title: '墨境随笔与搜索' },
+      { id: 'celadon', label: '天青汝窑', icon: '🍵', avatarClass: 'rounded-[12px]', title: '天青云影阁' }
+    ];
+    let currentThemeIndex = 0;
+
+    const toggleBtn = document.getElementById('theme-toggle');
+    const themeLabel = document.getElementById('theme-label');
+    const body = document.body;
+    const avatar = document.getElementById('user-avatar');
+    const sidebarTitle = document.getElementById('sidebarTitle');
+
+    // 三套美学意境下的微观文字翻译对应表
+    const labels = {
+        'modernist': {
+            elapsedPrefix: "历时 ", elapsedSuffix: " 秒",
+            statusLabel: "正在理清脉络与检索文献...",
+            kpiEngine: "引擎", kpiTime: "响应", kpiToken: "消耗", kpiCost: "估值: 约 ¥",
+            quotePrefix: "引用自："
+        },
+        'shanshui': {
+            elapsedPrefix: "展卷披阅 ", elapsedSuffix: " 息",
+            statusLabel: "磨墨展卷，披阅群书...",
+            kpiEngine: "阵眼", kpiTime: "历时", kpiToken: "笔墨", kpiCost: "润笔: 约 ¥",
+            quotePrefix: "典出："
+        },
+        'celadon': {
+            elapsedPrefix: "静阅青卷 ", elapsedSuffix: " 瞬",
+            statusLabel: "风摇寒竹，翻阅秘宗...",
+            kpiEngine: "枢机", kpiTime: "探看", kpiToken: "贝叶", kpiCost: "功德: 约 ¥",
+            quotePrefix: "玉简载："
+        }
+    };
+
+    // ---------- 主题应用逻辑 ----------
+    function applyTheme() {
+      const theme = themes[currentThemeIndex];
+      body.setAttribute('data-theme', theme.id);
+      themeLabel.textContent = theme.label;
+      toggleBtn.lastElementChild.textContent = theme.icon;
+      sidebarTitle.textContent = theme.title;
+      
+      // 头像变化
+      avatar.className = `w-10 h-10 bg-[#2c3e50] flex items-center justify-center text-white font-bold text-lg flex-shrink-0 transition-all duration-300 ${theme.avatarClass}`;
+      
+      // 转译页面上所有已渲染的动态微观词汇
+      updateDOMTexts(theme.id);
+      localStorage.setItem('app-mood-theme', theme.id);
+    }
+
+    function updateDOMTexts(themeId) {
+        const l = labels[themeId];
+        if (!l) return;
+
+        // 1. 更新所有正在计时/或已结束计时的标签
+        document.querySelectorAll('.elapsed-timer').forEach(el => {
+            const match = el.textContent.match(/[\d.]+/);
+            if (match) {
+                el.textContent = `${l.elapsedPrefix}${match[0]}${l.elapsedSuffix}`;
+            }
+        });
+
+        // 2. 更新 KPI 面板词汇对标
+        document.querySelectorAll('.kpi-row').forEach(row => {
+            const spans = row.querySelectorAll('span');
+            spans.forEach(span => {
+                const text = span.textContent;
+                if (text.includes('引擎') || text.includes('阵眼') || text.includes('枢机')) {
+                    span.childNodes.forEach(node => {
+                        if (node.nodeType === Node.TEXT_NODE && (node.nodeValue.includes('引擎') || node.nodeValue.includes('阵眼') || node.nodeValue.includes('枢机'))) {
+                            node.nodeValue = node.nodeValue.replace(/.*?(引擎|阵眼|枢机)/, l.kpiEngine);
+                        }
+                    });
+                } else if (text.includes('响应') || text.includes('历时') || text.includes('探看')) {
+                    span.childNodes.forEach(node => {
+                        if (node.nodeType === Node.TEXT_NODE && (node.nodeValue.includes('响应') || node.nodeValue.includes('历时') || node.nodeValue.includes('探看'))) {
+                            node.nodeValue = node.nodeValue.replace(/.*?(响应|历时|探看)/, l.kpiTime);
+                        }
+                    });
+                } else if (text.includes('消耗') || text.includes('笔墨') || text.includes('贝叶')) {
+                    span.childNodes.forEach(node => {
+                        if (node.nodeType === Node.TEXT_NODE && (node.nodeValue.includes('消耗') || node.nodeValue.includes('笔墨') || node.nodeValue.includes('贝叶'))) {
+                            node.nodeValue = node.nodeValue.replace(/.*?(消耗|笔墨|贝叶)/, l.kpiToken);
+                        }
+                    });
+                } else if (text.includes('估值') || text.includes('润笔') || text.includes('功德')) {
+                    span.childNodes.forEach(node => {
+                        if (node.nodeType === Node.TEXT_NODE && (node.nodeValue.includes('估值') || node.nodeValue.includes('润笔') || node.nodeValue.includes('功德'))) {
+                            node.nodeValue = node.nodeValue.replace(/.*?(估值: 约 ¥|润笔: 约 ¥|功德: 约 ¥)/, l.kpiCost);
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    toggleBtn.addEventListener('click', () => {
+      currentThemeIndex = (currentThemeIndex + 1) % themes.length;
+      applyTheme();
+    });
+
+    // ---------- 辅助工具函数 ----------
+    function generateThreadId() {
+        return 'thread_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
+    }
+
+    function getOrCreateThreadId() {
+        let stored = localStorage.getItem('adaptive_thread_id');
+        if (!stored) {
+            stored = generateThreadId();
+            localStorage.setItem('adaptive_thread_id', stored);
+        }
+        return stored;
+    }
+
+    function setStatus(statusText, isError = false) {
+        const el = document.getElementById('connection-status');
+        const dot = document.getElementById('status-dot');
+        if (el) el.textContent = statusText;
+        if (dot) {
+            if (isError) {
+                dot.className = "w-2 h-2 rounded-full bg-rose-500 animate-pulse";
+            } else {
+                dot.className = "w-2 h-2 rounded-full bg-accent animate-pulse";
+            }
+        }
+    }
+
+    function scrollToBottom() {
+        const container = document.getElementById('chat-area');
+        setTimeout(() => {
+            container.scrollTop = container.scrollHeight;
+        }, 50);
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    // ---------- 动态 DOM 构建 ----------
+
+    // 1. 追加用户发送的气泡
+    function addUserMessage(content) {
+        const wrap = document.getElementById('chat-messages-wrap');
+        const outer = document.createElement('div');
+        outer.className = "flex justify-end";
+        outer.innerHTML = `
+            <div class="bg-user-msg text-main px-5 py-3 rounded-2xl rounded-tr-sm max-w-2xl text-[15px] shadow-sm">
+                ${escapeHtml(content)}
+            </div>
+        `;
+        wrap.appendChild(outer);
+        scrollToBottom();
+    }
+
+    // 2. 追加全新的美学流式助手消息容器组
+    function createAssistantMessageGroup() {
+        const wrap = document.getElementById('chat-messages-wrap');
+        const outer = document.createElement('div');
+        outer.className = "flex flex-col space-y-4";
+        
+        outer.innerHTML = `
+            <!-- 思考 Details 折叠盒 -->
+            <details class="group border border-light rounded-xl bg-think shadow-sm overflow-hidden text-sm thinking-block" open style="display: none;">
+                <summary class="px-4 py-3 cursor-pointer flex justify-between items-center select-none text-muted border-b border-light group-open:border-opacity-100 border-opacity-0 transition-all">
+                    <div class="flex items-center space-x-2">
+                        <span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
+                        <span class="italic dyn-thinking-status">正在理清脉络与检索文献...</span>
+                    </div>
+                    <div class="flex flex-col items-end gap-0.5 justify-center">
+                        <div class="text-xs text-muted font-mono elapsed-timer">0.0s</div>
+                        <div class="collapse-btn select-none cursor-pointer opacity-80 hover:opacity-100 transition-transform duration-300 group-open:rotate-180" onclick="event.stopPropagation(); const d = this.closest('details'); d.open = !d.open;"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 9l-7 7-7-7" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg></div>
+                    </div>
+                </summary>
+                <div class="p-4 space-y-4 text-muted bg-think/50 thinking-content"></div>
+            </details>
+            
+            <!-- 大模型最终回答主体 -->
+            <div class="prose prose-slate max-w-none text-main assistant-bubble" style="display: none;"></div>
+            
+            <!-- KPI 指标页脚 -->
+            <div class="flex items-center space-x-6 text-xs text-muted pt-4 border-t border-dashed border-light mt-4 kpi-row" style="display: none;"></div>
+        `;
+        wrap.appendChild(outer);
+        scrollToBottom();
+
+        return {
+            container: outer,
+            thinkingBlock: outer.querySelector('.thinking-block'),
+            thinkingStatus: outer.querySelector('.dyn-thinking-status'),
+            elapsedTimer: outer.querySelector('.elapsed-timer'),
+            thinkingContent: outer.querySelector('.thinking-content'),
+            answerBubble: outer.querySelector('.assistant-bubble'),
+            kpiRow: outer.querySelector('.kpi-row'),
+            startTime: Date.now(),
+            timerId: null
+        };
+    }
+
+    // 计时器管理器
+    function startThinkingTimer(msgGroup) {
+        msgGroup.thinkingBlock.style.display = 'block';
+        msgGroup.timerId = setInterval(() => {
+            const l = labels[themes[currentThemeIndex].id] || labels['modernist'];
+            const elapsed = ((Date.now() - msgGroup.startTime) / 1000).toFixed(1);
+            msgGroup.elapsedTimer.textContent = `${l.elapsedPrefix}${elapsed}${l.elapsedSuffix}`;
+        }, 100);
+    }
+
+    function stopThinkingTimer(msgGroup) {
+        if (msgGroup.timerId) {
+            clearInterval(msgGroup.timerId);
+            msgGroup.timerId = null;
+        }
+        const l = labels[themes[currentThemeIndex].id] || labels['modernist'];
+        const elapsed = ((Date.now() - msgGroup.startTime) / 1000).toFixed(1);
+        msgGroup.elapsedTimer.textContent = `${l.elapsedPrefix}${elapsed}${l.elapsedSuffix}`;
+    }
+
+    // ---------- SSE 核心连接读取逻辑 ----------
+    async function sendChatRequest(message, isResume = false, resumeValue = null) {
+        if (isProcessing) return;
+        isProcessing = true;
+
+        const sendBtn = document.getElementById('send-button');
+        sendBtn.disabled = true;
+
+        let payload = { thread_id: currentThreadId };
+        if (isResume && resumeValue !== null) {
+            payload.resume_value = resumeValue;
+        } else {
+            payload.message = message;
+        }
+
+        currentAssistantMsgGroup = createAssistantMessageGroup();
+        startThinkingTimer(currentAssistantMsgGroup);
+
+        // 设置动态生成的思考状态标题
+        const l = labels[themes[currentThemeIndex].id] || labels['modernist'];
+        currentAssistantMsgGroup.thinkingStatus.textContent = l.statusLabel;
+
+        let accumulatedText = '';
+        let interruptEventData = null;
+
+        try {
+            const response = await fetch(`${API_BASE}/chat/stream`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop(); // 预留残线
+
+                for (const line of lines) {
+                    if (line.trim().startsWith('data: ')) {
+                        const dataStr = line.replace(/^\s*data:\s*/, '');
+                        try {
+                            const event = JSON.parse(dataStr);
+                            const result = await handleStreamEvent(event, currentAssistantMsgGroup, accumulatedText, (newText) => {
+                                accumulatedText = newText;
+                            });
+                            if (result && result.interrupted) {
+                                interruptEventData = result.interruptEvent;
+                                break;
+                            }
+                        } catch (e) {
+                            console.warn('解析流式 JSON 发生错误:', dataStr, e);
+                        }
+                    }
+                }
+                if (interruptEventData) break;
+            }
+
+            if (!interruptEventData && accumulatedText === '') {
+                currentAssistantMsgGroup.answerBubble.style.display = 'block';
+                currentAssistantMsgGroup.answerBubble.innerHTML = `<p class="text-rose-500">⚠️ 未收到有效回复。可能由于后端返回空。请重试。</p>`;
+                stopThinkingTimer(currentAssistantMsgGroup);
+            }
+
+        } catch (err) {
+            console.error('连接失败:', err);
+            setStatus('连接受阻', true);
+            if (currentAssistantMsgGroup) {
+                currentAssistantMsgGroup.answerBubble.style.display = 'block';
+                currentAssistantMsgGroup.answerBubble.innerHTML = `<p class="text-rose-500">❌ 错误: ${err.message}</p>`;
+                stopThinkingTimer(currentAssistantMsgGroup);
+            }
+        } finally {
+            if (!interruptEventData) {
+                isProcessing = false;
+                sendBtn.disabled = false;
+                document.getElementById('message-input').focus();
+            }
+        }
+
+        if (interruptEventData) {
+            await handleInterruptAndResume(interruptEventData, currentAssistantMsgGroup, sendBtn);
+        }
+    }
+
+    // ---------- SSE 各类分发事件处理 ----------
+    async function handleStreamEvent(event, msgGroup, currentText, updateTextCallback) {
+        const l = labels[themes[currentThemeIndex].id] || labels['modernist'];
+        
+        switch (event.type) {
+            case 'status':
+                {
+                    const iter = event.iteration || 0;
+                    const conf = event.confidence != null ? (event.confidence * 100).toFixed(0) + '%' : '--';
+                    const missing = event.missing_info || '';
+                    
+                    const statusBadge = document.createElement('div');
+                    statusBadge.className = 'mini-badge italic text-xs text-accent mb-2';
+                    statusBadge.textContent = `🔄 第 ${iter} 轮研判 | 置信度: ${conf} ${missing ? ' | 缺失: ' + missing : ''}`;
+                    msgGroup.thinkingContent.appendChild(statusBadge);
+                    scrollToBottom();
+                }
+                break;
+
+            case 'search_result':
+                {
+                    const kw = event.keyword || '意图搜寻';
+                    const ct = event.content || '';
+                    const shortContent = ct.length > 200 ? ct.slice(0, 200) + '...' : ct;
+
+                    const searchCard = document.createElement('div');
+                    searchCard.className = 'border-l-2 border-gray-300 pl-3 mb-4';
+                    searchCard.innerHTML = `
+                        <p class="font-medium text-main text-[13px]">${l.quotePrefix}${escapeHtml(kw)}</p>
+                        <p class="text-xs mt-0.5 leading-relaxed">${escapeHtml(shortContent)}</p>
+                    `;
+                    msgGroup.thinkingContent.appendChild(searchCard);
+                    scrollToBottom();
+                }
+                break;
+
+            case 'final':
+                {
+                    stopThinkingTimer(msgGroup);
+                    // 完成后折叠思考框
+                    msgGroup.thinkingBlock.open = false;
+
+                    const report = event.content || '';
+                    msgGroup.answerBubble.style.display = 'block';
+                    msgGroup.answerBubble.innerHTML = `<p class="whitespace-pre-wrap leading-relaxed">${escapeHtml(report)}</p>`;
+                    updateTextCallback(report);
+                    scrollToBottom();
+                }
+                break;
+
+            case 'kpi':
+                {
+                    const data = event.data || {};
+                    const elapsed = data.elapsed_seconds != null ? data.elapsed_seconds.toFixed(1) + 's' : '--';
+                    const totalTok = data.total_tokens || 0;
+                    const costEst = (totalTok / 1000 * 0.0015).toFixed(4);
+
+                    msgGroup.kpiRow.style.display = 'flex';
+                    msgGroup.kpiRow.innerHTML = `
+                        <span class="flex items-center"><svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg> ${l.kpiEngine}: ${data.current_llm || 'ollama'}</span>
+                        <span class="flex items-center"><svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg> ${l.kpiTime}: ${elapsed}</span>
+                        <span class="flex items-center"><svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg> ${l.kpiToken}: ${totalTok.toLocaleString()}</span>
+                        <span class="flex items-center"><svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg> ${l.kpiCost}${costEst}</span>
+                    `;
+                    scrollToBottom();
+                }
+                break;
+
+            case 'interrupt':
+                return {
+                    interrupted: true,
+                    interruptEvent: {
+                        question: event.question || '置信度评估异常，是否继续？',
+                        data: event.data || {}
+                    }
+                };
+
+            case 'error':
+                {
+                    stopThinkingTimer(msgGroup);
+                    msgGroup.answerBubble.style.display = 'block';
+                    msgGroup.answerBubble.innerHTML = `<p class="text-rose-500">❌ 服务发生错误: ${event.message}</p>`;
+                }
+                break;
+        }
+        return { interrupted: false };
+    }
+
+    // ---------- 人工审批 (HIL) 流程控制 ----------
+    async function handleInterruptAndResume(interruptEvent, msgGroup, sendBtn) {
+        stopThinkingTimer(msgGroup);
+        
+        msgGroup.answerBubble.style.display = 'block';
+        msgGroup.answerBubble.innerHTML = `<p class="text-amber-600 italic">⏳ 等待研讨人员批准确认中...</p>`;
+
+        const userChoice = await showInterruptModal(interruptEvent.question);
+
+        if (userChoice === 'yes') {
+            msgGroup.answerBubble.innerHTML = `<p class="text-emerald-600 italic">✅ 已批准继续执行分析，请稍候...</p>`;
+            isProcessing = false;
+            await resumeWithValue('yes');
+        } else {
+            msgGroup.answerBubble.innerHTML = `<p class="text-rose-600 italic">❌ 分析请求已被终止。</p>`;
+            isProcessing = false;
+            sendBtn.disabled = false;
+            document.getElementById('message-input').focus();
+        }
+    }
+
+    function showInterruptModal(questionText) {
+        return new Promise((resolve) => {
+            const modal = document.getElementById('interrupt-modal');
+            document.getElementById('interrupt-question').textContent = questionText;
+
+            const approveBtn = document.getElementById('modal-approve');
+            const rejectBtn = document.getElementById('modal-reject');
+
+            function cleanup(choice) {
+                modal.style.display = 'none';
+                approveBtn.onclick = null;
+                rejectBtn.onclick = null;
+                resolve(choice);
+            }
+
+            approveBtn.onclick = () => cleanup('yes');
+            rejectBtn.onclick = () => cleanup('no');
+            modal.style.display = 'flex';
+        });
+    }
+
+    async function resumeWithValue(resumeValue) {
+        await sendChatRequest(null, true, resumeValue);
+    }
+
+    // ---------- 会话中断恢复（页面刷新检测） ----------
+    async function checkSessionStatus() {
+        if (!currentThreadId) return;
+        try {
+            const resp = await fetch(`${API_BASE}/status/${currentThreadId}`);
+            if (resp.ok) {
+                const data = await resp.json();
+                const banner = document.getElementById('recovery-banner');
+                if (data.status === 'interrupted') {
+                    banner.style.display = 'flex';
+                } else {
+                    banner.style.display = 'none';
+                }
+            }
+        } catch (err) {
+            console.warn('后端状态拉取离线（可忽略）:', err);
+        }
+    }
+
+    async function handleRecoveryAction(action) {
+        document.getElementById('recovery-banner').style.display = 'none';
+        if (action === 'approve') {
+            await resumeWithValue('yes');
+        } else {
+            setStatus('研讨会话重置');
+        }
+    }
+
+    // ---------- 输入框发送主控 ----------
+    async function onSendMessage() {
+        if (isProcessing) return;
+        const inputEl = document.getElementById('message-input');
+        const message = inputEl.value.trim();
+        if (!message) return;
+
+        addUserMessage(message);
+        inputEl.value = '';
+        inputEl.style.height = 'auto';
+        document.getElementById('recovery-banner').style.display = 'none';
+
+        await sendChatRequest(message, false, null);
+    }
+
+    // ---------- 模拟账户设置 ----------
+    function setupLoginModule() {
+        const profileBtn = document.getElementById('userProfileBtn');
+        const modal = document.getElementById('login-modal');
+        const cancelBtn = document.getElementById('login-cancel');
+        const confirmBtn = document.getElementById('login-confirm');
+        const usernameInput = document.getElementById('username-input');
+
+        const savedUser = localStorage.getItem('app_user_name');
+        if (savedUser) {
+            updateAccountUI(savedUser);
+        }
+
+        profileBtn.onclick = () => {
+            usernameInput.value = localStorage.getItem('app_user_name') || '';
+            modal.style.display = 'flex';
+        };
+
+        cancelBtn.onclick = () => modal.style.display = 'none';
+        
+        confirmBtn.onclick = () => {
+            const username = usernameInput.value.trim();
+            if (username) {
+                localStorage.setItem('app_user_name', username);
+                updateAccountUI(username);
+            } else {
+                localStorage.removeItem('app_user_name');
+                updateAccountUI(null);
+            }
+            modal.style.display = 'none';
+        };
+    }
+
+    function updateAccountUI(username) {
+        const displayU = document.getElementById('displayUsername');
+        const displayR = document.getElementById('displayRole');
+        const avatarEl = document.getElementById('user-avatar');
+
+        if (username) {
+            displayU.textContent = username;
+            displayR.textContent = '专业版 Pro 账户';
+            avatarEl.textContent = username.charAt(0).toUpperCase();
+        } else {
+            displayU.textContent = '李清照 (研究员)';
+            displayR.textContent = '研讨室一号成员';
+            avatarEl.textContent = '李';
+        }
+    }
+
+    // ---------- 页面初始化启动 ----------
+    async function init() {
+        currentThreadId = getOrCreateThreadId();
+        
+        // 绑定发送按钮事件
+        document.getElementById('send-button').onclick = onSendMessage;
+        const inputArea = document.getElementById('message-input');
+        inputArea.onkeydown = (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                onSendMessage();
+            }
+        };
+
+        // 新建会话逻辑
+        document.getElementById('newChatBtn').onclick = () => {
+            if (isProcessing) return;
+            currentThreadId = generateThreadId();
+            localStorage.setItem('adaptive_thread_id', currentThreadId);
+            document.getElementById('chat-messages-wrap').innerHTML = `
+                <div class="flex flex-col gap-4">
+                    <article class="prose prose-slate max-w-none text-main leading-relaxed">
+                        <p>全新研讨会话已开启。请问有何吩咐？</p>
+                    </article>
+                </div>
+            `;
+        };
+
+        // 自动缩放文本框高度
+        inputArea.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+        });
+
+        // 中断恢复事件绑定
+        document.getElementById('recovery-approve').onclick = () => handleRecoveryAction('approve');
+        document.getElementById('recovery-reject').onclick = () => handleRecoveryAction('reject');
+
+        // 主题检测与加载
+        const savedTheme = localStorage.getItem('app-mood-theme');
+        if (savedTheme) {
+            const index = themes.findIndex(t => t.id === savedTheme);
+            if (index !== -1) currentThemeIndex = index;
+        }
+        applyTheme();
+
+        setupLoginModule();
+        setStatus('协同引擎在线', false);
+        await checkSessionStatus();
+    }
+
+    // 运行
+    init();
+</script>
+<!-- END: Backend SSE Integration and Theme Script -->
+</body>
+</html>

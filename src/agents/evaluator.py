@@ -53,9 +53,8 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
         if config and "configurable" in config
         else "ollama"
     )
-
+    # 从结果中鲁棒性提取JSON字段
     parsed = await robust_json_parse(content)
-
     confidence = float(parsed.get("confidence_score", 0.0))
     missing = parsed.get("missing_info", "")
     retry = parsed.get("retry_keywords", [])

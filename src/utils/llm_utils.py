@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import logging
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -18,6 +19,8 @@ from langchain_ollama import ChatOllama
 from pydantic import SecretStr
 
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_provider(config: RunnableConfig | None = None) -> str:
@@ -146,6 +149,14 @@ async def llm_call_with_fallback(
 
                 # 添加Jitter避免所有请求同时重试，造成雪崩
                 sleep_time = min((2**attempt) * random.uniform(0.5, 1.0), 10)
+                logger.warning(
+                    "LLM 调用失败(provider=%s, attempt=%d/%d): %s，%.1fs 后重试",
+                    provider,
+                    attempt + 1,
+                    settings.llm_max_retries + 1,
+                    e,
+                    sleep_time,
+                )
                 await asyncio.sleep(sleep_time)
                 continue
             # 重试耗尽，进入备援阶段
@@ -155,6 +166,13 @@ async def llm_call_with_fallback(
     if not settings.llm_fallback_enabled or provider == "deepseek":
         # 已经是 deepseek 仍失败，或无备援 → 直接抛出
         raise last_error  # type: ignore[misc]
+
+    logger.warning(
+        "主模型 %s 重试 %d 次全部失败(最后错误: %s)，切换到备援 DeepSeek",
+        provider,
+        settings.llm_max_retries + 1,
+        last_error,
+    )
 
     # 修改 config 中的 provider，后续节点自动使用 deepseek
     if config and "configurable" in config:

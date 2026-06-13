@@ -21,12 +21,14 @@ async def planner(state: AgentState, config: RunnableConfig | None = None) -> di
         state: LangGraph 传递的当前全局状态。
         config: LangGraph RunnableConfig，其中的 configurable.llm_provider
                指定本节点使用的 LLM。
+               RunnableConfig 是 LangGraph 定义的一个配置对象，包含了可配置参数（configurable）和其他运行时信息。
 
     Returns:
         部分状态更新字典，含 plan / total_tokens / input_tokens /
         output_tokens / current_llm。
     """
     query = state["user_query"]
+    # .get() 方法安全访问可能不存在的字段，避免 KeyError，提供默认值
     missing = state.get("missing_info", "")
     iteration = state.get("iteration", 0)
 
@@ -56,7 +58,7 @@ async def planner(state: AgentState, config: RunnableConfig | None = None) -> di
     plan = parsed.get("plan", [query])
     # dict.fromkeys() 是 Python 里唯一能保序的去重方法
     plan = list(dict.fromkeys(plan))[:5]
-    print(f"Planner 输出原始内容: {content}")
+    # print(f"Planner 输出原始内容: {content}")
     return {
         "plan": plan,
         "total_tokens": total_tok,  # operator.add 自动累加

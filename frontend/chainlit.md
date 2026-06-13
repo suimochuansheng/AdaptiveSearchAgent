@@ -1,7 +1,6 @@
 # Welcome to Chainlit! 🚀🤖
 
 Hi there, Developer! 👋 We're excited to have you on board. Chainlit is a powerful tool designed to help you prototype, debug and share applications built on top of LLMs.
-嗨，开发者！👋 我们非常高兴您能加入我们。Chainlit 是一款功能强大的工具，旨在帮助您进行应用原型设计、调试以及分享基于语言模型构建的应用程序。
 
 ## Useful Links 🔗
 
@@ -13,4 +12,3 @@ We can't wait to see what you create with Chainlit! Happy coding! 💻😊
 ## Welcome screen
 
 To modify the welcome screen, edit the `chainlit.md` file at the root of your project. If you do not want a welcome screen, just leave this file empty.
-要修改欢迎界面，请编辑项目根目录下的 `chainlit.md` 文件。如果不需要欢迎界面，只需将此文件留空即可。

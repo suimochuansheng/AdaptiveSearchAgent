@@ -20,16 +20,15 @@ langchain-community = "^0.4.1"
 langchain-ollama = "^1.1.0"
 httpx = "^0.28.1"
 langchain-deepseek = "^1.0.1"
-langgraph-checkpoint-sqlite = "^2.0.0"  # 或者最新版本
 rich = "^13.0.0"
 langgraph-cli = {extras = ["inmem"], version = "^0.4.26"}
 langgraph-checkpoint-postgres = "^3.1.0"
-asyncpg = "^0.31.0"
-psycopg2-binary = "^2.9.12"
+psycopg = {extras = ["binary"], version = "^3.3"}
+psycopg-pool = "^3.3"
 python-dotenv = "^1.2.2"
 redis = "^7.4.0"
 pydantic = "^2.13.4"
-dotenv = "^0.9.9"
+pgvector = "^0.4.2"
 
 [tool.poetry.group.frontend]
 optional = true  # 可选组，默认不安装
@@ -70,6 +69,10 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+exclude = [
+    "frontend/",
+    "scripts/",
+]
 
 [tool.poetry.scripts] # 定义命令行脚本
 # 只需要运行 poetry run api 就能启动服务器
