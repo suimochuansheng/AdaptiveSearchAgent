@@ -39,6 +39,17 @@ from redis import asyncio as aioredis
 
 from config import settings
 
+# Sentry 崩溃自动捕获（仅当配置了 DSN 时启用）
+import sentry_sdk
+
+if settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        traces_sample_rate=1.0,
+        environment=settings.ENV,
+    )
+    logger.info("✅ Sentry 已启用 (environment=%s)", settings.ENV)
+
 # Langfuse 可观测性（仅当启用且密钥非空时初始化）
 if settings.LANGFUSE_ENABLED and settings.LANGFUSE_PUBLIC_KEY:
     from langfuse.langchain import CallbackHandler

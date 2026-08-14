@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     LANGFUSE_SECRET_KEY: str = ""
     LANGFUSE_ENABLED: bool = False
 
+    # Sentry 崩溃自动捕获
+    SENTRY_DSN: str = ""  # 为空则不启用
+    ENV: str = "dev"  # 环境标识 (dev/staging/prod)
+
     # DEBUG 模式开关，控制日志输出和调试信息
     DEBUG: bool = False
 

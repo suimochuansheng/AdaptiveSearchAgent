@@ -36,6 +36,7 @@ langchain-google-vertexai = "^3.2.4"
 langfuse = "^4"
 flashrank = "^0.2.10"
 celery = "^5.6.3"
+sentry-sdk = "^2.68.0"
 
 [tool.poetry.group.frontend]
 optional = true  # 可选组，默认不安装
