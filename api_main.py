@@ -68,10 +68,6 @@ from src.graph_factory import get_graph
 if TYPE_CHECKING:
     from src.state import AgentState
 
-# ---------- 日志配置 ----------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # 用于跟踪后台任务，以便在 shutdown 时优雅取消
 cleanup_task = None
 
