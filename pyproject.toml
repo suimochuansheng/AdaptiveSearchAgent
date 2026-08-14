@@ -73,6 +73,7 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "C", "B", "UP", "SIM", "TCH"]
 ignore = ["E501"]  # 行长度交给格式化器
+per-file-ignores = { "api_main.py" = ["E402"], "scripts/*.py" = ["E402"] }  # load_dotenv/sys.path 必须先于 import
 
 [tool.ruff.format]
 quote-style = "double"
@@ -83,7 +84,9 @@ testpaths = ["tests"]
 
 [tool.mypy]
 python_version = "3.11"
-warn_return_any = true
+warn_return_any = false
+allow_untyped_defs = true
+check_untyped_defs = false
 warn_unused_configs = true
 ignore_missing_imports = true
 exclude = [

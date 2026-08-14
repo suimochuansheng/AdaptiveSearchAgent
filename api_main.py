@@ -29,6 +29,8 @@ from contextlib import asynccontextmanager
 from datetime import UTC
 from typing import TYPE_CHECKING, Any, cast
 
+# Sentry 崩溃自动捕获（仅当配置了 DSN 时启用）
+import sentry_sdk
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -38,9 +40,6 @@ from pydantic import BaseModel
 from redis import asyncio as aioredis
 
 from config import settings
-
-# Sentry 崩溃自动捕获（仅当配置了 DSN 时启用）
-import sentry_sdk
 
 if settings.SENTRY_DSN:
     sentry_sdk.init(

@@ -46,14 +46,13 @@ class UserProfileStore:
             字典永远包含 3 个键：preferred_language, answer_style, recent_topics。
         """
         await self._ensure_pool()
-        async with self._pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT preferred_language, answer_style, recent_topics "
-                    "FROM user_profiles WHERE user_id = %s",
-                    (user_id,),
-                )
-                row = await cur.fetchone()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT preferred_language, answer_style, recent_topics "
+                "FROM user_profiles WHERE user_id = %s",
+                (user_id,),
+            )
+            row = await cur.fetchone()
 
         if row is None:
             return {
