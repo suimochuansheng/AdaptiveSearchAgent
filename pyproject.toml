@@ -6,7 +6,7 @@ authors = ["Your Name"]
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.11,<3.14.0"
 langgraph = "^1.1.10"
 langchain = "^1.2.17"
 tavily-python = "^0.7.24"
@@ -26,9 +26,16 @@ langgraph-checkpoint-postgres = "^3.1.0"
 psycopg = {extras = ["binary"], version = "^3.3"}
 psycopg-pool = "^3.3"
 python-dotenv = "^1.2.2"
+pyyaml = "^6.0"
 redis = "^7.4.0"
 pydantic = "^2.13.4"
 pgvector = "^0.4.2"
+docling = "^2.0.0"
+chainlit = "^2.11.1"
+langchain-google-vertexai = "^3.2.4"
+langfuse = "^4"
+flashrank = "^0.2.10"
+celery = "^5.6.3"
 
 [tool.poetry.group.frontend]
 optional = true  # 可选组，默认不安装
@@ -50,7 +57,12 @@ dev = [
     "mypy (>=2.0.0,<3.0.0)",
     "ruff (>=0.15.12,<0.16.0)",
     "bandit (>=1.9.4,<2.0.0)",
-    "pre-commit (>=4.6.0,<5.0.0)"
+    "pre-commit (>=4.6.0,<5.0.0)",
+    "pytest-html (>=4.2.0,<5.0.0)",
+    "ragas (>=0.4.3,<0.5.0)",
+    "datasets (>=5.0.0,<6.0.0)",
+    "langchain-google-vertexai (>=3.2.4,<4.0.0)",
+    "pytest-cov (>=7.1.0,<8.0.0)"
 ]
 
 [tool.ruff]
@@ -63,6 +75,10 @@ ignore = ["E501"]  # 行长度交给格式化器
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [tool.mypy]
 python_version = "3.11"

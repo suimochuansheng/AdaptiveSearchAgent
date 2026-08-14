@@ -70,3 +70,6 @@ documents/
 # 前端
 .chainlit/
 frontend/.chainlit/
+
+# 测试生成产物（pytest-html 瞬态报告）
+tests/test_report/

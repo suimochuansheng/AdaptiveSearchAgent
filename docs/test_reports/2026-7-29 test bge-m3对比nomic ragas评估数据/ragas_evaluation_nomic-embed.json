@@ -1,0 +1,32 @@
+{
+  "model_evaluated": "nomic-embed",
+  "total_questions": 20,
+  "max_workers": 4,
+  "timeout_seconds": 120,
+  "elapsed_seconds": {
+    "retrieval": 85.1,
+    "evaluation": 3818.8,
+    "total": 3903.9
+  },
+  "retrieval_errors": 0,
+  "metrics": {
+    "context_recall": {
+      "mean": 0.3,
+      "median": 0.0,
+      "min": 0.0,
+      "max": 1.0
+    },
+    "faithfulness": {
+      "mean": 0.9333,
+      "median": 1.0,
+      "min": 0.0,
+      "max": 1.0
+    },
+    "answer_relevancy": {
+      "mean": 0.2125,
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.7784
+    }
+  }
+}

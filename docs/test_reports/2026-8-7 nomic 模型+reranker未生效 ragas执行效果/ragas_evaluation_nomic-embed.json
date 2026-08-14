@@ -1,0 +1,71 @@
+{
+  "model_evaluated": "nomic-embed",
+  "total_questions": 20,
+  "max_workers": 4,
+  "timeout_seconds": 120,
+  "elapsed_seconds": {
+    "retrieval": 127.4,
+    "evaluation": 3779.1,
+    "total": 3906.5
+  },
+  "retrieval_errors": 0,
+  "doc_attribution_accuracy": 0.45,
+  "metrics": {
+    "context_recall": {
+      "mean": 0.4,
+      "median": 0.0,
+      "min": 0.0,
+      "max": 1.0
+    },
+    "faithfulness": {
+      "mean": 0.7947,
+      "median": 1.0,
+      "min": 0.0,
+      "max": 1.0
+    },
+    "answer_relevancy": {
+      "mean": 0.3362,
+      "median": 0.1952,
+      "min": 0.0,
+      "max": 0.8303
+    }
+  },
+  "metadata_stats": {
+    "category": {
+      "factual": 18,
+      "summary": 2
+    },
+    "difficulty": {
+      "medium": 9,
+      "easy": 10,
+      "hard": 1
+    },
+    "tags": {
+      "解析": 4,
+      "双栏布局": 1,
+      "PostgreSQL": 2,
+      "pgvector": 2,
+      "性能": 3,
+      "分块策略": 3,
+      "Token": 1,
+      "检索精准度": 1,
+      "索引": 1,
+      "大模型": 1,
+      "上下文": 1,
+      "Milvus": 2,
+      "Elasticsearch": 1,
+      "混合检索": 1,
+      "向量数据库": 2,
+      "性能对比": 1,
+      "企业应用": 1,
+      "基准测试": 3,
+      "配置": 1,
+      "向量模型": 1,
+      "相似度算法": 1,
+      "OCR": 2,
+      "HITL": 1,
+      "人机协同": 1,
+      "检索": 1
+    }
+  }
+}

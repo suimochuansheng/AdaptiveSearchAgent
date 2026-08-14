@@ -115,8 +115,13 @@ async def test_robust_markdown_wrapped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_robust_all_strategies_fail() -> None:
-    """所有策略均失败，返回 {}。"""
+async def test_robust_all_strategies_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """所有策略均失败，返回 {}。
+
+    通过清空 DeepSeek API Key 让策略4（LLM 修复）短路，
+    确保纯文本输入走完四层回退后最终降级返回空字典。
+    """
+    monkeypatch.setattr(jp, "DEEPSEEK_API_KEY", "")
     result = await jp.robust_json_parse("今天天气真好")
     assert result == {}
 

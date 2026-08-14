@@ -25,7 +25,9 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
         部分状态更新字典。
     """
     query = state["user_query"]
-    results = state.get("search_results", [])
+    # 合并本轮的并行 worker 结果到 search_results
+    new_results = state.get("_search_accum", [])
+    results = state.get("search_results", []) + new_results
 
     results_summary = "\n\n".join(
         f"关键词：{r['keyword']}\n内容：{r['content'][:500]}" for r in results[:5]
@@ -35,11 +37,20 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
 搜索结果：
 {results_summary}
 
-请判断这些搜索结果是否足以回答用户问题。输出 JSON 格式如下：
+请判断这些搜索结果是否足以回答用户问题。
+
+判定标准（重要）：
+- 如果搜索结果中**已包含用户问题的核心概念定义**，且至少有一条相关说明，
+  则置信度 ≥ 0.80，判定为"已满足"。
+- 如果搜索结果中**部分覆盖**问题但缺少关键细节（如数据、时间、对比），
+  置信度 0.50~0.79，需补充搜索。
+- 如果搜索结果**与问题完全无关**或为空，置信度 < 0.50。
+
+输出 JSON 格式如下：
 {{
-    "confidence_score": 0.85,    // 0~1 之间的浮点数，表示回答置信度
-    "missing_info": "还缺少功耗数据",   // 信息不足时，描述缺少的内容
-    "retry_keywords": ["RTX 5090 功耗", "RTX 5090 TDP"]  // 建议补充搜索的关键词
+    "confidence_score": 0.85,
+    "missing_info": "还缺少功耗数据",
+    "retry_keywords": ["RTX 5090 功耗"]
 }}
 如果信息已足够，missing_info 为空字符串，retry_keywords 为空列表。
 只输出 JSON，不要额外文字。"""
@@ -63,6 +74,8 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
         "confidence_score": confidence,
         "missing_info": missing,
         "retry_keywords": retry,
+        "search_results": results,  # 持久化合并结果
+        "_search_accum": ["__RESET__"],  # 通过自定义 reducer 信号清零
         "iteration": state.get("iteration", 0) + 1,  # 本轮评估完成，递增轮次
         "total_tokens": total_tok,  # operator.add 自动累加（API 直接返回 total）
         "input_tokens": in_tok,

@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     # OpenAI 兼容 API 地址（备援使用）
     openai_base_url: str = ""
 
+    # 千问模型API Key
+    ALIYUN_QWEN_MODEL_NAME: str = "qwen3.8-max"
+    ALIYUN_QWEN_API_KEY: str = ""
+    ALIYUN_QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # qwen 3.8-max模型 新增控制思考深度的参数
+    ALIYUN_QWEN_MODEL_REASONING_EFFORT: str = "medium"
     # 结果可信度阈值（0~1）
     confidence_threshold: float = 0.8
     # 枚举字段，控制 planner 和 evaluator 使用的模型提供商
@@ -57,6 +63,7 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
+        "extra": "ignore",  # 忽略 .env 中未定义字段
     }
     langchain_tracing_v2: bool | None = False  # 或者 str，按实际需要
 
@@ -74,6 +81,40 @@ class Settings(BaseSettings):
     # 新增字段，与 .env 中的变量名一致
     fastapi_base_url: str = "http://localhost:8000"  # 后端基础 URL
     chainlit_port: int = 8001  # Chainlit 前端端口
+
+    # FastAPI / Uvicorn 服务配置
+    SERVICE_HOST: str = "0.0.0.0"
+    SERVICE_PORT: int = 8000
+
+    # RAG 摄入子服务地址
+    INGEST_SERVICE_URL: str = "http://localhost:8100"
+
+    # 上下文长度保护
+    MAX_SEARCH_RESULTS: int = 5  # 单次检索最多保留条数
+    MAX_CONTEXT_TOKENS: int = 4000  # writer 上下文 token 上限
+
+    # Langfuse 可观测性
+    LANGFUSE_HOST: str = "https://cloud.langfuse.com"
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_ENABLED: bool = False
+
+    # DEBUG 模式开关，控制日志输出和调试信息
+    DEBUG: bool = False
+
+    # ===== 新功能开关（默认关闭，零破坏性） =====
+
+    # 动态工具路由：根据用户画像/上下文动态选择工具集
+    ENABLE_DYNAMIC_TOOLS: bool = False
+
+    # 长期记忆：持久化用户偏好与历史话题
+    ENABLE_MEMORY: bool = False
+
+    # 异步任务：超时请求转为后台异步任务处理
+    ENABLE_ASYNC_TASK: bool = False
+
+    # 异步任务触发阈值（秒），超过此阈值的请求将转换为后台任务
+    ASYNC_TASK_THRESHOLD_SECONDS: int = 120
 
 
 # 全局单例，项目各处从此导入

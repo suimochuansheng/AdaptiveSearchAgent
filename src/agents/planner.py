@@ -59,9 +59,17 @@ async def planner(state: AgentState, config: RunnableConfig | None = None) -> di
     # dict.fromkeys() 是 Python 里唯一能保序的去重方法
     plan = list(dict.fromkeys(plan))[:5]
     # print(f"Planner 输出原始内容: {content}")
+    # 首轮规划（iteration==0）清零旧结果；重试轮保留已积累的 search_results
+    clears: dict = {}
+    if iteration == 0:
+        clears = {"search_results": [], "_search_accum": ["__RESET__"]}
+
     return {
         "plan": plan,
-        "total_tokens": total_tok,  # operator.add 自动累加
+        "pending_keywords": [],
+        **clears,
+        # Token 计数（operator.add 自动累加）
+        "total_tokens": total_tok,
         "input_tokens": in_tok,
         "output_tokens": out_tok,
         "current_llm": current_provider,

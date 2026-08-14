@@ -11,16 +11,27 @@ AdaptiveSearchAgent 的 FastAPI 入口模块
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# 将 .env 注入 os.environ（langfuse SDK 从环境变量读取配置）
+_ENV_FILE = Path(__file__).resolve().parent / ".env"
+if _ENV_FILE.exists():
+    load_dotenv(_ENV_FILE)
+
 import asyncio
 import json
 import logging
+
+logger = logging.getLogger(__name__)
 from contextlib import asynccontextmanager
 from datetime import UTC
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from pydantic import BaseModel
@@ -28,7 +39,18 @@ from redis import asyncio as aioredis
 
 from config import settings
 
+# Langfuse 可观测性（仅当启用且密钥非空时初始化）
+if settings.LANGFUSE_ENABLED and settings.LANGFUSE_PUBLIC_KEY:
+    from langfuse.langchain import CallbackHandler
+
+    langfuse_handler = CallbackHandler()
+    logger.info("✅ Langfuse 追踪已启用 (host=%s)", settings.LANGFUSE_HOST)
+else:
+    langfuse_handler = None
+    logger.warning("⚠️ Langfuse 未启用 (检查 LANGFUSE_ENABLED 和 LANGFUSE_PUBLIC_KEY)")
+
 # 导入公共图工厂和状态
+from src import checkpointer  # 模块级引用，供测试 mock 及新增端点使用
 from src.checkpointer import close_checkpointer, init_checkpointer
 from src.graph_factory import get_graph
 
@@ -66,33 +88,6 @@ async def ensure_task_states_table():
                 state TEXT NOT NULL DEFAULT 'idle',
                 interrupt_time TIMESTAMP
             )
-        """)
-
-
-# ---------- RAG 知识库表管理 ----------
-async def ensure_knowledge_embeddings_table():
-    """确保 knowledge_embeddings 表存在（pgvector 向量表）。"""
-    from src import checkpointer
-
-    assert checkpointer._global_pool is not None, "数据库连接池未初始化"
-    async with checkpointer._global_pool.connection() as conn:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS knowledge_embeddings (
-                id          SERIAL PRIMARY KEY,
-                title       TEXT NOT NULL,
-                content     TEXT NOT NULL,
-                embedding   vector(768),
-                source_file TEXT,
-                created_at  TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        # 向量索引（仅当表有数据时创建）
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_knowledge_embedding
-            ON knowledge_embeddings
-            USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 10)
         """)
 
 
@@ -138,7 +133,6 @@ async def lifespan(app: FastAPI):
     # 1. 初始化数据库连接和任务表
     await init_checkpointer()
     await ensure_task_states_table()
-    await ensure_knowledge_embeddings_table()  # RAG 知识库向量表
 
     # 2. 启动后台清理任务
     async def clean_interrupted_tasks():
@@ -218,8 +212,12 @@ async def execute_agent(thread_id: str, user_input: str | None = None, resume_va
     if resume_value is None:
         reset_model_switch_count()
 
-    # 配置 LangGraph 会话ID + 使用的模型--我们有模型切换
-    config = {"configurable": {"thread_id": thread_id, "llm_provider": "ollama"}}
+    # 配置 LangGraph 会话ID + 使用的模型 + Langfuse 回调
+    config: dict[str, Any] = {
+        "configurable": {"thread_id": thread_id, "llm_provider": "ollama"},
+    }
+    if langfuse_handler:
+        config["callbacks"] = [langfuse_handler]
 
     # ====================== 核心：分布式锁 ======================
     # 为每个 thread_id 创建 Redis 分布式锁，防止同一会话并发执行
@@ -429,6 +427,12 @@ async def execute_agent(thread_id: str, user_input: str | None = None, resume_va
             await lock.release()
 
     # ====================== 异常处理 ======================
+    # 客户端主动断开 → 释放锁并静默退出
+    except GeneratorExit:
+        if acquired:
+            await lock.release()
+        raise
+
     # 图被主动中断 → 释放锁让恢复请求可以重新获取
     except GraphInterrupt:
         await set_task_state(thread_id, "interrupted", interrupt_time=datetime.now(UTC))
@@ -500,6 +504,13 @@ async def chat_stream(request: Request, body: ChatRequest):
                 # yield是流式推送，按照SSE协议格式返回数据：data: JSON字符串\n\n
                 yield f"data: {json.dumps(event)}\n\n"
 
+        # ===================== 捕获客户端主动断开 =====================
+        except GeneratorExit:
+            # 前端关闭连接或刷新页面时触发，直接清理退出
+            # 【严禁在此处 yield — 会抛出 RuntimeError】
+            logger.info("SSE 连接被客户端关闭 (GeneratorExit), thread_id=%s", thread_id)
+            return
+
         # ===================== 捕获Agent执行中断（需要用户审批） =====================
         except GraphInterrupt as e:
             # 从中断异常中提取数据（通常包含需要用户确认的问题）
@@ -549,3 +560,108 @@ async def get_status(thread_id: str):
 async def health_check():
     """简单健康检查，确认服务存活"""
     return {"status": "ok", "message": "FastAPI + LangGraph 集成运行中"}
+
+
+# ===== 新增端点：异步任务状态查询（ENABLE_ASYNC_TASK 控制启用） =====
+
+
+@app.get("/api/task/{thread_id}/status")
+async def get_task_status(thread_id: str):
+    """查询异步任务的执行状态。
+
+    复用 task_states 表（由 ensure_task_states_table 创建），
+    返回 thread_id 对应的执行状态和最近更新时间。
+
+    Args:
+        thread_id: 会话/任务唯一标识。
+
+    Returns:
+        {"thread_id": str, "state": str, "updated_at": str | None}
+        或 404 {"detail": "Task not found"}。
+    """
+    assert checkpointer._global_pool is not None, "数据库连接池未初始化"
+
+    async with checkpointer._global_pool.connection() as conn:
+        result = await conn.execute(
+            "SELECT state, interrupt_time FROM task_states WHERE thread_id = %s",
+            (thread_id,),
+        )
+        row = await result.fetchone()
+
+    if row is None:
+        raise HTTPException(404, "Task not found")
+
+    return {
+        "thread_id": thread_id,
+        "state": row["state"],
+        "updated_at": row["interrupt_time"].isoformat() if row["interrupt_time"] else None,
+    }
+
+
+@app.get("/api/task/{thread_id}/result")
+async def get_task_result(thread_id: str):
+    """查询异步任务的最终执行结果。
+
+    仅当任务状态为 completed 时返回 final_report；
+    否则返回 202 引导前端轮询 /api/task/{thread_id}/status。
+
+    Args:
+        thread_id: 会话/任务唯一标识。
+
+    Returns:
+        completed → {"thread_id": str, "final_report": str, "total_tokens": int}
+        未完成   → 202 {"message": str}
+        未找到   → 404 {"detail": str}
+    """
+    # 1. 先查 task_states 确认状态
+    assert checkpointer._global_pool is not None, "数据库连接池未初始化"
+
+    async with checkpointer._global_pool.connection() as conn:
+        result = await conn.execute(
+            "SELECT state FROM task_states WHERE thread_id = %s",
+            (thread_id,),
+        )
+        row = await result.fetchone()
+
+    if row is None:
+        raise HTTPException(404, "Task not found")
+
+    if row["state"] != "completed":
+        return JSONResponse(
+            status_code=202,
+            content={
+                "message": (
+                    "Task is still processing, " f"please check /api/task/{thread_id}/status"
+                ),
+            },
+        )
+
+    # 2. 从 LangGraph Checkpointer 捞取最终状态
+    graph = await get_graph()
+    config = {"configurable": {"thread_id": thread_id}}
+    final_state = await graph.aget_state(config)
+
+    if final_state is None or not final_state.values:
+        raise HTTPException(500, "已完成的任务无法读取最终状态，请联系管理员")
+
+    values = final_state.values
+    return {
+        "thread_id": thread_id,
+        "final_report": values.get("final_report", ""),
+        "total_tokens": values.get("total_tokens", 0),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 入口
+# ═══════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "api_main:app",
+        host=settings.SERVICE_HOST,
+        port=settings.SERVICE_PORT,
+        reload=True,
+    )

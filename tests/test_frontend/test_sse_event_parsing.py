@@ -1,20 +1,30 @@
-"""SSE 事件解析单元测试 —— 覆盖 _handle_sse_event 所有事件类型。
+"""SSE 事件解析单元测试 —— 覆盖 _handle_thinking_event 和 _handle_output_event。
 
 测试目标：验证前端对后端 SSE 事件的解析逻辑在各种输入下的正确性。
 无需网络，无需 Chainlit 运行时，纯逻辑测试。
+
+注：前端重构为"全自动模式"后，原 _handle_sse_event 拆分为两个函数：
+- _handle_thinking_event：处理 status / search_result / kpi（写入思考 Step）
+- _handle_output_event：处理 final / error（写入主 Message，返回是否结束）
 """
 
 from unittest.mock import AsyncMock
 
 import pytest
 
-# 从 frontend 模块导入待测函数
-from frontend.app import _handle_sse_event
+from frontend.app import _handle_output_event, _handle_thinking_event
 
 
 # =============================================================================
-# 辅助函数：创建 mock Message 对象
+# 辅助函数
 # =============================================================================
+def _mock_step() -> AsyncMock:
+    """创建一个带 stream_token 方法的 mock Step。"""
+    step = AsyncMock()
+    step.stream_token = AsyncMock()
+    return step
+
+
 def _mock_msg() -> AsyncMock:
     """创建一个带 stream_token 方法的 mock Message。"""
     msg = AsyncMock()
@@ -23,7 +33,7 @@ def _mock_msg() -> AsyncMock:
 
 
 # =============================================================================
-# 1. status 事件 — 中间状态推送
+# _handle_thinking_event — status / search_result / kpi
 # =============================================================================
 class TestStatusEvent:
     """验证 status 事件的格式化输出（置信度、迭代轮数、缺失信息）。"""
@@ -31,14 +41,13 @@ class TestStatusEvent:
     @pytest.mark.asyncio
     async def test_完整状态事件(self) -> None:
         """status 事件含 confidence、iteration、missing_info → 应输出所有三项。"""
-        msg = _mock_msg()
+        step = _mock_step()
         data = {"confidence": 0.75, "iteration": 2, "missing_info": "缺少NLP最新进展"}
 
-        stopped = await _handle_sse_event("status", data, msg)
+        await _handle_thinking_event("status", data, step)
 
-        assert stopped is False  # status 不终止流
-        msg.stream_token.assert_called_once()
-        token_text: str = msg.stream_token.call_args[0][0]
+        step.stream_token.assert_called_once()
+        token_text: str = step.stream_token.call_args[0][0]
         assert "第 2 轮评估" in token_text
         assert "75%" in token_text
         assert "缺少NLP最新进展" in token_text
@@ -46,13 +55,12 @@ class TestStatusEvent:
     @pytest.mark.asyncio
     async def test_status_无缺失信息(self) -> None:
         """status 事件 missing_info 为空 → 不输出缺失信息行。"""
-        msg = _mock_msg()
+        step = _mock_step()
         data = {"confidence": 0.5, "iteration": 1, "missing_info": ""}
 
-        stopped = await _handle_sse_event("status", data, msg)
+        await _handle_thinking_event("status", data, step)
 
-        assert stopped is False
-        token_text: str = msg.stream_token.call_args[0][0]
+        token_text: str = step.stream_token.call_args[0][0]
         assert "第 1 轮评估" in token_text
         assert "50%" in token_text
         assert "缺失信息" not in token_text
@@ -60,19 +68,45 @@ class TestStatusEvent:
     @pytest.mark.asyncio
     async def test_status_缺失字段使用默认值(self) -> None:
         """status 事件字段缺失 → 使用默认值 0 / 空字符串。"""
-        msg = _mock_msg()
+        step = _mock_step()
         data: dict = {}
 
-        stopped = await _handle_sse_event("status", data, msg)
+        await _handle_thinking_event("status", data, step)
 
-        assert stopped is False
-        token_text: str = msg.stream_token.call_args[0][0]
+        token_text: str = step.stream_token.call_args[0][0]
         assert "第 0 轮评估" in token_text
         assert "0%" in token_text
 
 
+class TestSearchResultEvent:
+    """验证 search_result 事件的格式化输出。"""
+
+    @pytest.mark.asyncio
+    async def test_search_result_有内容输出(self) -> None:
+        """search_result 含 keyword 和 content → 输出关键词与内容。"""
+        step = _mock_step()
+        data = {"keyword": "Python", "content": "Python 是一种编程语言"}
+
+        await _handle_thinking_event("search_result", data, step)
+
+        step.stream_token.assert_called_once()
+        token_text: str = step.stream_token.call_args[0][0]
+        assert "Python" in token_text
+        assert "Python 是一种编程语言" in token_text
+
+    @pytest.mark.asyncio
+    async def test_search_result_空关键词不输出(self) -> None:
+        """search_result 关键词为空 → 不调用 stream_token。"""
+        step = _mock_step()
+        data = {"keyword": "", "content": "内容"}
+
+        await _handle_thinking_event("search_result", data, step)
+
+        step.stream_token.assert_not_called()
+
+
 # =============================================================================
-# 2. final 事件 — 最终报告
+# _handle_output_event — final / error（返回是否结束）
 # =============================================================================
 class TestFinalEvent:
     """验证 final 事件：有内容输出、空内容输出、返回 True 终止流。"""
@@ -83,7 +117,7 @@ class TestFinalEvent:
         msg = _mock_msg()
         data = {"content": "## 最终报告\n这是测试报告内容。"}
 
-        stopped = await _handle_sse_event("final", data, msg)
+        stopped = await _handle_output_event("final", data, msg)
 
         assert stopped is True
         msg.stream_token.assert_called_once_with("## 最终报告\n这是测试报告内容。")
@@ -94,7 +128,7 @@ class TestFinalEvent:
         msg = _mock_msg()
         data = {"content": ""}
 
-        stopped = await _handle_sse_event("final", data, msg)
+        stopped = await _handle_output_event("final", data, msg)
 
         assert stopped is True
         msg.stream_token.assert_not_called()
@@ -105,22 +139,19 @@ class TestFinalEvent:
         msg = _mock_msg()
         data: dict = {}
 
-        stopped = await _handle_sse_event("final", data, msg)
+        stopped = await _handle_output_event("final", data, msg)
 
         assert stopped is True
         msg.stream_token.assert_not_called()
 
 
-# =============================================================================
-# 3. kpi 事件 — 执行统计
-# =============================================================================
 class TestKpiEvent:
-    """验证 KPI 事件的统计数据格式化。"""
+    """验证 KPI 事件的统计数据格式化（经 _handle_thinking_event 输出）。"""
 
     @pytest.mark.asyncio
     async def test_kpi_完整数据(self) -> None:
         """kpi 事件包含完整 KPI 数据 → 应格式化输出所有统计项。"""
-        msg = _mock_msg()
+        step = _mock_step()
         data = {
             "data": {
                 "current_llm": "deepseek",
@@ -133,10 +164,9 @@ class TestKpiEvent:
             }
         }
 
-        stopped = await _handle_sse_event("kpi", data, msg)
+        await _handle_thinking_event("kpi", data, step)
 
-        assert stopped is False  # kpi 不终止流
-        token_text: str = msg.stream_token.call_args[0][0]
+        token_text: str = step.stream_token.call_args[0][0]
         assert "执行统计" in token_text
         assert "deepseek" in token_text
         assert "1,500" in token_text
@@ -149,31 +179,26 @@ class TestKpiEvent:
     @pytest.mark.asyncio
     async def test_kpi_空data使用默认值(self) -> None:
         """kpi 事件 data 为空 → 使用默认值，不崩溃。"""
-        msg = _mock_msg()
+        step = _mock_step()
         data: dict = {"data": {}}
 
-        stopped = await _handle_sse_event("kpi", data, msg)
+        await _handle_thinking_event("kpi", data, step)
 
-        assert stopped is False
-        token_text: str = msg.stream_token.call_args[0][0]
+        token_text: str = step.stream_token.call_args[0][0]
         assert "0" in token_text  # 各项默认值为 0
 
     @pytest.mark.asyncio
     async def test_kpi_缺少data字段(self) -> None:
         """kpi 事件完全缺少 data 字段 → 不崩溃，使用默认值。"""
-        msg = _mock_msg()
+        step = _mock_step()
         data: dict = {}
 
-        stopped = await _handle_sse_event("kpi", data, msg)
+        await _handle_thinking_event("kpi", data, step)
 
-        assert stopped is False
-        token_text: str = msg.stream_token.call_args[0][0]
+        token_text: str = step.stream_token.call_args[0][0]
         assert "执行统计" in token_text
 
 
-# =============================================================================
-# 4. error 事件 — 错误处理
-# =============================================================================
 class TestErrorEvent:
     """验证 error 事件：输出错误信息并终止流。"""
 
@@ -183,7 +208,7 @@ class TestErrorEvent:
         msg = _mock_msg()
         data = {"message": "模型调用超时，请重试"}
 
-        stopped = await _handle_sse_event("error", data, msg)
+        stopped = await _handle_output_event("error", data, msg)
 
         assert stopped is True
         token_text: str = msg.stream_token.call_args[0][0]
@@ -196,7 +221,7 @@ class TestErrorEvent:
         msg = _mock_msg()
         data: dict = {}
 
-        stopped = await _handle_sse_event("error", data, msg)
+        stopped = await _handle_output_event("error", data, msg)
 
         assert stopped is True
         token_text: str = msg.stream_token.call_args[0][0]
@@ -204,7 +229,7 @@ class TestErrorEvent:
 
 
 # =============================================================================
-# 5. 未知事件类型 / 边界情况
+# 未知事件类型 / 边界情况
 # =============================================================================
 class TestUnknownEvent:
     """验证未知事件类型和边界输入的处理。"""
@@ -215,7 +240,7 @@ class TestUnknownEvent:
         msg = _mock_msg()
         data: dict = {}
 
-        stopped = await _handle_sse_event("unknown_type", data, msg)
+        stopped = await _handle_output_event("unknown_type", data, msg)
 
         assert stopped is False
         msg.stream_token.assert_not_called()
@@ -226,17 +251,16 @@ class TestUnknownEvent:
         msg = _mock_msg()
         data: dict = {}
 
-        stopped = await _handle_sse_event("", data, msg)
+        stopped = await _handle_output_event("", data, msg)
 
         assert stopped is False
 
     @pytest.mark.asyncio
     async def test_interrupt事件类型不在此处理(self) -> None:
-        """interrupt 类型应由上层 _stream_agent_with_interrupt 处理，
-        _handle_sse_event 中应作为未知事件返回 False。"""
+        """interrupt 类型在 _handle_output_event 中作为未知事件返回 False。"""
         msg = _mock_msg()
         data = {"question": "需要批准", "data": {}}
 
-        stopped = await _handle_sse_event("interrupt", data, msg)
+        stopped = await _handle_output_event("interrupt", data, msg)
 
         assert stopped is False
