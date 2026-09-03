@@ -15,6 +15,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# ——————————————————————————————————langfuse加载开始——————————————————————————————
 # 将 .env 注入 os.environ（langfuse SDK 从环境变量读取配置）
 _ENV_FILE = Path(__file__).resolve().parent / ".env"
 if _ENV_FILE.exists():
@@ -23,7 +24,7 @@ if _ENV_FILE.exists():
 import asyncio
 import json
 import logging
-
+# ——————————————————————————————————————日志记录工具加载开始————————————————————————————
 logger = logging.getLogger(__name__)
 from contextlib import asynccontextmanager
 from datetime import UTC
@@ -38,6 +39,7 @@ from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from pydantic import BaseModel
 from redis import asyncio as aioredis
+from src.checkpointer import get_business_pool
 
 from config import settings
 
@@ -60,7 +62,6 @@ else:
     logger.warning("⚠️ Langfuse 未启用 (检查 LANGFUSE_ENABLED 和 LANGFUSE_PUBLIC_KEY)")
 
 # 导入公共图工厂和状态
-from src import checkpointer  # 模块级引用，供测试 mock 及新增端点使用
 from src.checkpointer import close_checkpointer, init_checkpointer
 from src.graph_factory import get_graph
 
@@ -81,13 +82,20 @@ class ChatRequest(BaseModel):
     resume_value: Any | None = None  # 恢复时传入的用户审批结果（如 "yes"/"no"）
 
 
+class DemoRequest(BaseModel):
+    """ReAct 工具调用演示接口请求体。"""
+
+    query: str  # 用户问题，可直接用 DEMO_REACT_PROMPT 作为面试演示用例
+    model: str | None = None  # 预留字段：当前 demo 图固定使用 settings.ollama_model_name
+
+
 # ---------- PostgreSQL 任务状态表管理 ----------
 async def ensure_task_states_table():
     """确保 task_states 表存在，用于记录每个 thread_id 的执行状态"""
-    from src import checkpointer
+    from src.checkpointer import get_business_pool
 
-    assert checkpointer._global_pool is not None, "数据库连接池未初始化"
-    async with checkpointer._global_pool.connection() as conn:
+    assert get_business_pool() is not None, "数据库连接池未初始化"
+    async with get_business_pool().connection() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS task_states (
                 thread_id TEXT PRIMARY KEY,
@@ -99,11 +107,10 @@ async def ensure_task_states_table():
 
 async def get_task_state(thread_id: str) -> str:
     """查询任务状态：idle, running, interrupted, completed, failed"""
-    from src import checkpointer
 
     # assert 强制检查
-    assert checkpointer._global_pool is not None, "数据库连接池未初始化"
-    async with checkpointer._global_pool.connection() as conn:
+    assert get_business_pool() is not None, "数据库连接池未初始化"
+    async with get_business_pool().connection() as conn:
         # 查这个task_states表看这个thread_id的状态是什么，如果没有记录就默认idle
         result = await conn.execute(
             "SELECT state FROM task_states WHERE thread_id = %s", (thread_id,)
@@ -117,10 +124,9 @@ async def get_task_state(thread_id: str) -> str:
 
 async def set_task_state(thread_id: str, state: str, interrupt_time=None):
     """更新任务状态，可选记录中断时间（用于超时清理）"""
-    from src import checkpointer
 
-    assert checkpointer._global_pool is not None, "数据库连接池未初始化"
-    async with checkpointer._global_pool.connection() as conn:
+    assert get_business_pool() is not None, "数据库连接池未初始化"
+    async with get_business_pool().connection() as conn:
         await conn.execute(
             """
             INSERT INTO task_states (thread_id, state, interrupt_time)
@@ -144,11 +150,11 @@ async def lifespan(app: FastAPI):
     async def clean_interrupted_tasks():
         while True:
             await asyncio.sleep(60)  # 每分钟执行一次
-            from src import checkpointer
+            get_business_pool()
 
-            if checkpointer._global_pool is None:
+            if get_business_pool() is None:
                 continue
-            async with checkpointer._global_pool.connection() as conn:
+            async with get_business_pool().connection() as conn:
                 result = await conn.execute("""
                     SELECT thread_id FROM task_states
                     WHERE state = 'interrupted'
@@ -208,6 +214,7 @@ async def execute_agent(thread_id: str, user_input: str | None = None, resume_va
     - 首次请求：使用 user_input 构建完整 AgentState。
     - 恢复请求：使用 Command(resume=...) 恢复被中断的图。
     产出事件类型：status（中间状态）、token（流式文本）、final（最终报告）、kpi、interrupt、error
+
     """
     import time as time_module
     from datetime import datetime
@@ -222,6 +229,7 @@ async def execute_agent(thread_id: str, user_input: str | None = None, resume_va
     config: dict[str, Any] = {
         "configurable": {"thread_id": thread_id, "llm_provider": "ollama"},
     }
+    # Langfuse 回调：仅在启用且密钥非空时添加
     if langfuse_handler:
         config["callbacks"] = [langfuse_handler]
 
@@ -233,6 +241,7 @@ async def execute_agent(thread_id: str, user_input: str | None = None, resume_va
 
     # 锁获取失败 → 分情况处理
     if not acquired:
+        # 去数据库查询当前任务状态，判断是中断、完成还是正在运行
         status = await get_task_state(thread_id)
         if status == "interrupted":
             # 恢复请求：允许通过（锁由上次中断请求持有，会在 except 中释放）
@@ -278,7 +287,8 @@ async def execute_agent(thread_id: str, user_input: str | None = None, resume_va
                 # ── 中间状态：仅在置信度/轮次变化时推送，避免重复 ──
                 cur_conf = final_state.get("confidence_score", 0.0)
                 cur_iter = final_state.get("iteration", 0)
-                if cur_conf != _last_conf or cur_iter != _last_iter:
+                # evaluator 尚未运行（iteration == 0）时跳过，避免“第 0 轮评估”占位
+                if cur_iter > 0 and (cur_conf != _last_conf or cur_iter != _last_iter):
                     _last_conf = cur_conf
                     _last_iter = cur_iter
                     yield {
@@ -322,20 +332,21 @@ async def execute_agent(thread_id: str, user_input: str | None = None, resume_va
                 "user_query": user_input,
                 "plan": [],
                 "search_results": [],
+                "_search_accum": [],
                 "confidence_score": 0.0,
                 "missing_info": "",
+                "user_feedback": "",
                 "retry_keywords": [],
                 "iteration": 0,
                 "final_report": "",
-                "human_approved": False,
                 "task_id": thread_id,
-                "thread_id": thread_id,
                 "total_tokens": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "current_llm": "ollama",
                 "pending_keywords": [],
                 "_batch_keywords": [],
+                "hitl_decision": "",
             }
 
             # 流式执行图
@@ -345,7 +356,8 @@ async def execute_agent(thread_id: str, user_input: str | None = None, resume_va
                 # ── 中间状态：仅在置信度/轮次变化时推送，避免重复 ──
                 cur_conf = final_state.get("confidence_score", 0.0)
                 cur_iter = final_state.get("iteration", 0)
-                if cur_conf != _last_conf or cur_iter != _last_iter:
+                # evaluator 尚未运行（iteration == 0）时跳过，避免“第 0 轮评估”占位
+                if cur_iter > 0 and (cur_conf != _last_conf or cur_iter != _last_iter):
                     _last_conf = cur_conf
                     _last_iter = cur_iter
                     yield {
@@ -568,6 +580,80 @@ async def health_check():
     return {"status": "ok", "message": "FastAPI + LangGraph 集成运行中"}
 
 
+# ===== ReAct 工具调用演示端点（ENABLE_DYNAMIC_TOOLS 控制启用） =====
+
+# 面试演示 Prompt：触发“先搜后算”的自主工具决策循环
+DEMO_REACT_PROMPT = (
+    "请先搜索 OpenAI 2025 年各季度营收，然后把四个季度的数字加起来，"
+    "用 calculator 计算总和，最后用中文回答。"
+)
+
+# 动态工具图全局缓存（懒加载单例，避免每次请求重建 ChatOllama + ToolNode）
+_demo_tool_graph = None
+
+
+def _get_demo_tool_graph():
+    """返回缓存的动态工具调用图（首次调用时构建）。"""
+    global _demo_tool_graph
+    if _demo_tool_graph is None:
+        from src.agents.tool_demo import build_dynamic_tool_graph
+
+        _demo_tool_graph = build_dynamic_tool_graph()
+    return _demo_tool_graph
+
+
+@app.post("/demo/tools")
+async def demo_tools(payload: DemoRequest):
+    """面试演示接口：LLM 自主决策调用工具（ReAct / Tool Calling）。
+
+    仅当 settings.ENABLE_DYNAMIC_TOOLS=True 时启用。
+    演示用例可直接使用 DEMO_REACT_PROMPT（先搜后算）。
+    """
+    if not settings.ENABLE_DYNAMIC_TOOLS:
+        raise HTTPException(
+            status_code=403,
+            detail="ENABLE_DYNAMIC_TOOLS 未启用，请在 .env 中设置 ENABLE_DYNAMIC_TOOLS=True 后重试",
+        )
+
+    if payload.model:
+        logger.info(
+            "demo/tools 收到 model=%s，demo 图固定使用 settings.ollama_model_name=%s",
+            payload.model,
+            settings.ollama_model_name,
+        )
+
+    from langchain_core.messages import HumanMessage
+
+    graph = _get_demo_tool_graph()
+
+    try:
+        result = await graph.ainvoke({"messages": [HumanMessage(content=payload.query)]})
+    except Exception as exc:
+        logger.exception("demo/tools 执行失败")
+        raise HTTPException(status_code=500, detail=f"ReAct 演示执行失败: {exc}") from exc
+
+    messages = result.get("messages", []) if isinstance(result, dict) else []
+    tool_calls_log: list[str] = []
+    for msg in messages:
+        for call in getattr(msg, "tool_calls", None) or []:
+            if isinstance(call, dict):
+                name = call.get("name", "unknown")
+                args = call.get("args", {})
+            else:
+                name = getattr(call, "name", "unknown")
+                args = getattr(call, "args", {}) or {}
+            tool_calls_log.append(f"{name}({json.dumps(args, ensure_ascii=False)})")
+
+    final_msg = messages[-1] if messages else None
+    answer = getattr(final_msg, "content", "") or ""
+
+    return {
+        "answer": answer,
+        "tool_calls_log": tool_calls_log,
+        "model_used": settings.ollama_model_name,
+    }
+
+
 # ===== 新增端点：异步任务状态查询（ENABLE_ASYNC_TASK 控制启用） =====
 
 
@@ -585,9 +671,9 @@ async def get_task_status(thread_id: str):
         {"thread_id": str, "state": str, "updated_at": str | None}
         或 404 {"detail": "Task not found"}。
     """
-    assert checkpointer._global_pool is not None, "数据库连接池未初始化"
+    assert get_business_pool() is not None, "数据库连接池未初始化"
 
-    async with checkpointer._global_pool.connection() as conn:
+    async with get_business_pool().connection() as conn:
         result = await conn.execute(
             "SELECT state, interrupt_time FROM task_states WHERE thread_id = %s",
             (thread_id,),
@@ -620,9 +706,9 @@ async def get_task_result(thread_id: str):
         未找到   → 404 {"detail": str}
     """
     # 1. 先查 task_states 确认状态
-    assert checkpointer._global_pool is not None, "数据库连接池未初始化"
+    assert get_business_pool() is not None, "数据库连接池未初始化"
 
-    async with checkpointer._global_pool.connection() as conn:
+    async with get_business_pool().connection() as conn:
         result = await conn.execute(
             "SELECT state FROM task_states WHERE thread_id = %s",
             (thread_id,),
