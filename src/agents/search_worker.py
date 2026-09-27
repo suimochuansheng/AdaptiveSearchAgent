@@ -14,22 +14,25 @@ from src.utils.logger import log_node
 async def search_worker(state: dict) -> dict:
     """单个关键词搜索节点 — RAG + Tavily 并行检索。
 
-    LangGraph Send API 将 AgentState + {"keyword": str} 合并传入。
+    LangGraph Send API 会将 AgentState + 附加字段合并传入。
+    附加字段包括：keyword, task_id, iteration
     """
     keyword: str = state["keyword"]
     kb_id: str = state.get("kb_id", "default")
 
-    # 并行检索：本地知识库 + 在线搜索同时发起
+    # 并行检索
     rag_task = search_knowledge(keyword, top_k=3, kb_id=kb_id)
     web_task = search_tavily(keyword)
 
+    rag_result: str | Exception
+    web_result: str | Exception
     rag_result, web_result = await asyncio.gather(
         rag_task,
         web_task,
         return_exceptions=True,
     )
 
-    # 合并结果（截断过长的单条文本，防止 Token 暴涨）
+    # 合并结果
     parts: list[str] = []
     if rag_result and not isinstance(rag_result, Exception):
         parts.append(f"[本地知识库]\n{rag_result[:800]}")
@@ -38,4 +41,5 @@ async def search_worker(state: dict) -> dict:
 
     content = "\n\n".join(parts) if parts else f"未找到关于 '{keyword}' 的相关信息"
 
+    # 返回时保留上下文（可选：将上下文也写入日志）
     return {"_search_accum": [{"keyword": keyword, "content": content}]}

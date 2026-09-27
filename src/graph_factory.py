@@ -7,6 +7,7 @@ from langgraph.graph import END, StateGraph
 
 from config import settings
 from src.agents.evaluator import evaluator
+from src.agents.hitl_confirm import hitl_confirm
 from src.agents.parallel_searcher import parallel_searcher, route_to_search_workers
 from src.agents.planner import planner
 from src.agents.search_worker import search_worker
@@ -50,15 +51,30 @@ def should_continue_wave(state: AgentState) -> str:
     return "planner"
 
 
+def route_after_hitl(state: AgentState) -> str:
+    """条件边路由：HITL 前置确认后决定搜索或取消。
+
+    - cancelled → writer（返回取消消息，图结束）
+    - 其他（confirmed / 无需确认）→ parallel_searcher（正常搜索）
+    """
+    if state.get("hitl_decision", "confirmed") == "cancelled":
+        return "writer"
+    return "parallel_searcher"
+
+
 def build_graph(checkpointer: BaseCheckpointSaver | None = None):
-    """构建全自动 LangGraph 工作流（无人工审批）。
+    """构建 LangGraph 工作流（含高成本搜索前置 HITL 确认）。
 
     图结构：
-        planner → parallel_searcher → workers → evaluator
-            ↑                                    │
-            └────────────── retry ───────────────┤
-                                                 ↓ (conf >= threshold | iter >= max)
-                                               writer → END
+        planner → hitl_confirm → parallel_searcher → workers → evaluator
+            ↑                                                    │
+            └──────────────────── retry ─────────────────────────┤
+                                                                 ↓ (conf >= threshold | iter >= max)
+                                                               writer → END
+
+    HITL 前置确认：
+        hitl_confirm 在 iteration == 0 且批次关键词 >= 5 时 interrupt()，
+        用户确认 → parallel_searcher；用户取消 → writer（返回取消消息）。
 
     Send 扇出机制：
         parallel_searcher 写入 _batch_keywords，
@@ -68,6 +84,7 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     # 注册节点
     builder.add_node("planner", planner)
+    builder.add_node("hitl_confirm", hitl_confirm)
     builder.add_node("parallel_searcher", parallel_searcher)
     builder.add_node("search_worker", search_worker)
     builder.add_node("evaluator", evaluator)
@@ -75,7 +92,17 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     # 图结构
     builder.set_entry_point("planner")
-    builder.add_edge("planner", "parallel_searcher")
+    builder.add_edge("planner", "hitl_confirm")
+
+    # hitl_confirm → 条件路由：确认（或无需确认）→ parallel_searcher；取消 → writer
+    builder.add_conditional_edges(
+        "hitl_confirm",
+        route_after_hitl,
+        {
+            "parallel_searcher": "parallel_searcher",
+            "writer": "writer",
+        },
+    )
 
     # parallel_searcher → 条件扇出到 workers 或直接 evaluator
     builder.add_conditional_edges(

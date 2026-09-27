@@ -1,4 +1,5 @@
-# src/checkpointer.py
+"""Checkpointer 管理模块 —— 连接池与 Saver 初始化。"""
+
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow, dict_row
@@ -6,49 +7,81 @@ from psycopg_pool import AsyncConnectionPool
 
 from config import settings
 
-# 全局 Saver 实例（供 langgraph checkpoint 使用）
+# ============================================================
+# 全局实例
+# ============================================================
 _global_saver: AsyncPostgresSaver | None = None
-# psycopg 异步连接池 —— 同时供 AsyncPostgresSaver 和 task_states CRUD 使用
-# DictRow = dict[str, Any]，与 AsyncPostgresSaver 要求的类型一致
-_global_pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
+_saver_pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
+_business_pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
 
 
 async def init_checkpointer() -> None:
-    """应用启动时创建异步连接池和全局 Saver。"""
-    global _global_saver, _global_pool
+    """初始化连接池和 Saver（应用启动时调用）。"""
+    global _global_saver, _saver_pool, _business_pool
     if _global_saver is not None:
         return
 
-    # 构建 psycopg 连接字符串
     conninfo = (
         f"postgresql://{settings.postgres_user}:{settings.postgres_password}"
         f"@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"
     )
 
-    # 创建 psycopg 异步连接池（langgraph AsyncPostgresSaver 原生支持）
-    _global_pool = AsyncConnectionPool[AsyncConnection[DictRow]](
+    # 1. Saver 专用连接池 —— 只给 AsyncPostgresSaver 用
+    _saver_pool = AsyncConnectionPool[AsyncConnection[DictRow]](
+        conninfo,
+        min_size=2,
+        max_size=10,
+        max_waiting=30,
+        timeout=30.0,
+        max_lifetime=600,
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+        },
+    )
+    await _saver_pool.open()  # ✅ 显式打开
+
+    # 2. 业务专用连接池 —— 只给 task_states 等业务查询用
+    _business_pool = AsyncConnectionPool[AsyncConnection[DictRow]](
         conninfo,
         min_size=1,
-        max_size=10,
-        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        max_size=5,
+        max_waiting=10,
+        timeout=10.0,
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+        },
     )
+    await _business_pool.open()  # ✅ 显式打开
 
-    # 创建 AsyncPostgresSaver 并初始化表结构（只会执行一次）
-    _global_saver = AsyncPostgresSaver(_global_pool)
+    # 3. 创建 Saver（使用 Saver 专用池）
+    _global_saver = AsyncPostgresSaver(_saver_pool)
     await _global_saver.setup()
 
 
 async def close_checkpointer() -> None:
-    """应用关闭时释放连接池。"""
-    global _global_saver, _global_pool
-    if _global_pool is not None:
-        await _global_pool.close()
-        _global_pool = None
+    global _global_saver, _saver_pool, _business_pool
+    if _saver_pool is not None:
+        await _saver_pool.close()
+        _saver_pool = None
+    if _business_pool is not None:
+        await _business_pool.close()
+        _business_pool = None
     _global_saver = None
 
 
 def get_checkpointer() -> AsyncPostgresSaver:
-    """返回全局唯一的 Saver 实例。"""
+    """返回全局 Saver 实例。"""
     if _global_saver is None:
-        raise RuntimeError("Checkpointer 尚未初始化。请先调用 init_checkpointer()。")
+        raise RuntimeError("Checkpointer 尚未初始化")
     return _global_saver
+
+
+def get_business_pool() -> AsyncConnectionPool:
+    """返回业务专用连接池（供 task_states 等查询使用）。"""
+    if _business_pool is None:
+        raise RuntimeError("业务连接池尚未初始化")
+    return _business_pool

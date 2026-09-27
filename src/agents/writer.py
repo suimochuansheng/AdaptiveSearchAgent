@@ -84,6 +84,17 @@ def _prepare_context(results: list[dict], max_tokens: int) -> str:
 @log_node("writer")
 async def writer(state: AgentState, config: RunnableConfig | None = None) -> dict:
     """LLM 驱动的报告生成：读取搜索结果 → 清洗噪声 → LLM 提炼 → Markdown 报告。"""
+    # HITL 高成本搜索前置确认：用户取消 → 不调用 LLM，直接返回取消消息
+    if state.get("hitl_decision") == "cancelled":
+        logger.info("用户已取消高成本搜索，返回取消消息")
+        return {
+            "final_report": (
+                "⚠️ **已取消本次搜索**\n\n"
+                "您未确认高成本搜索请求，本次未执行任何搜索，未产生搜索费用。\n"
+                "如需继续，请重新发送问题。"
+            )
+        }
+
     query = state["user_query"]
     results = state.get("search_results", [])
 

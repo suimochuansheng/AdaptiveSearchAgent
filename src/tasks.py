@@ -7,12 +7,16 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from celery import Celery
 
 from config import settings
 from src.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from src.state import AgentState
 
 logger = get_logger()
 
@@ -77,7 +81,6 @@ def execute_agent_task(self, thread_id: str, user_query: str) -> dict:
 
     async def _run() -> dict:
         from src.graph_factory import get_graph
-        from src.state import AgentState
 
         graph = await get_graph()
 
@@ -88,22 +91,23 @@ def execute_agent_task(self, thread_id: str, user_query: str) -> dict:
             "_search_accum": [],
             "confidence_score": 0.0,
             "missing_info": "",
+            "user_feedback": "",
             "retry_keywords": [],
             "iteration": 0,
             "final_report": "",
             "task_id": thread_id,
-            "thread_id": thread_id,
             "total_tokens": 0,
             "input_tokens": 0,
             "output_tokens": 0,
             "current_llm": "ollama",
             "pending_keywords": [],
             "_batch_keywords": [],
+            "hitl_decision": "",
         }
 
         config = {"configurable": {"thread_id": thread_id}}
 
-        async for event in graph.astream(initial_state, config):
+        async for _event in graph.astream(initial_state, config):
             # 检查任务是否被撤销
             if celery_app.control.revoke(self.request.id, terminate=False):
                 logger.warning("Task cancelled", extra={"task_id": self.request.id})

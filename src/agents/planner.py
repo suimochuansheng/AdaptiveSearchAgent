@@ -30,12 +30,16 @@ async def planner(state: AgentState, config: RunnableConfig | None = None) -> di
     query = state["user_query"]
     # .get() 方法安全访问可能不存在的字段，避免 KeyError，提供默认值
     missing = state.get("missing_info", "")
+    user_feedback = state.get("user_feedback", "")
     iteration = state.get("iteration", 0)
 
-    if missing and iteration > 0:
+    if (missing or user_feedback) and iteration > 0:
+        feedback_line = ""
+        if user_feedback:
+            feedback_line = f"\n    用户补充的关键信息：{user_feedback}"
         prompt = f"""用户原始问题：{query}
-    上一轮搜索后缺少的信息：{missing}
-    请根据缺少的信息，生成 3~5 个更精准的搜索关键词。
+    上一轮搜索后缺少的信息：{missing}{feedback_line}
+    请结合用户补充的信息，生成 3~5 个更精准的搜索关键词。
     只输出 JSON，格式：{{"plan": ["关键词1", "关键词2", ...]}}"""
     else:
         prompt = f"""用户问题：{query}

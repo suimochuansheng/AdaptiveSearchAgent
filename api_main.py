@@ -24,6 +24,7 @@ if _ENV_FILE.exists():
 import asyncio
 import json
 import logging
+
 # ——————————————————————————————————————日志记录工具加载开始————————————————————————————
 logger = logging.getLogger(__name__)
 from contextlib import asynccontextmanager
@@ -35,13 +36,14 @@ import sentry_sdk
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from pydantic import BaseModel
 from redis import asyncio as aioredis
-from src.checkpointer import get_business_pool
 
 from config import settings
+from src.checkpointer import get_business_pool
 
 if settings.SENTRY_DSN:
     sentry_sdk.init(
@@ -603,53 +605,74 @@ def _get_demo_tool_graph():
 
 
 @app.post("/demo/tools")
-async def demo_tools(payload: DemoRequest):
-    """面试演示接口：LLM 自主决策调用工具（ReAct / Tool Calling）。
-
-    仅当 settings.ENABLE_DYNAMIC_TOOLS=True 时启用。
-    演示用例可直接使用 DEMO_REACT_PROMPT（先搜后算）。
+async def demo_tools(request: DemoRequest):
     """
+    ReAct 工具调用演示接口（带完整执行轨迹）
+    """
+    # 1. 检查开关
     if not settings.ENABLE_DYNAMIC_TOOLS:
         raise HTTPException(
             status_code=403,
-            detail="ENABLE_DYNAMIC_TOOLS 未启用，请在 .env 中设置 ENABLE_DYNAMIC_TOOLS=True 后重试",
+            detail="ENABLE_DYNAMIC_TOOLS 未启用，请在 .env 中设置 ENABLE_DYNAMIC_TOOLS=True",
         )
 
-    if payload.model:
-        logger.info(
-            "demo/tools 收到 model=%s，demo 图固定使用 settings.ollama_model_name=%s",
-            payload.model,
-            settings.ollama_model_name,
-        )
-
-    from langchain_core.messages import HumanMessage
-
+    # 2. 获取或构建 Graph 单例
     graph = _get_demo_tool_graph()
 
+    # 3. 执行
+    query = request.query
     try:
-        result = await graph.ainvoke({"messages": [HumanMessage(content=payload.query)]})
-    except Exception as exc:
-        logger.exception("demo/tools 执行失败")
-        raise HTTPException(status_code=500, detail=f"ReAct 演示执行失败: {exc}") from exc
+        result = await graph.ainvoke({"messages": [HumanMessage(content=query)]})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
-    messages = result.get("messages", []) if isinstance(result, dict) else []
-    tool_calls_log: list[str] = []
-    for msg in messages:
-        for call in getattr(msg, "tool_calls", None) or []:
-            if isinstance(call, dict):
-                name = call.get("name", "unknown")
-                args = call.get("args", {})
+    # 4. 提取执行轨迹（核心新增逻辑）
+    execution_trace = []
+    tool_calls_log = []
+
+    for idx, msg in enumerate(result.get("messages", [])):
+        # 处理不同类型的消息
+        if msg.type == "human":
+            execution_trace.append({"step": idx, "type": "用户输入", "content": str(msg.content)})
+        elif msg.type == "ai":
+            # 如果有工具调用
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tool_name = tc.get("name", "unknown")
+                    tool_args = tc.get("args", {})
+                    tool_calls_log.append(f"{tool_name}({tool_args})")
+                    execution_trace.append(
+                        {
+                            "step": idx,
+                            "type": "🧠 LLM 决策",
+                            "action": f"调用工具: {tool_name}",
+                            "params": tool_args,
+                        }
+                    )
             else:
-                name = getattr(call, "name", "unknown")
-                args = getattr(call, "args", {}) or {}
-            tool_calls_log.append(f"{name}({json.dumps(args, ensure_ascii=False)})")
+                # 没有工具调用的 AI 回复（通常是最终答案）
+                execution_trace.append(
+                    {
+                        "step": idx,
+                        "type": "💬 最终回答",
+                        "content": str(msg.content)[:300],  # 截断以防过长
+                    }
+                )
+        elif msg.type == "tool":
+            execution_trace.append(
+                {
+                    "step": idx,
+                    "type": "🔧 工具结果",
+                    "content": str(msg.content)[:200],  # 截断以防过长
+                }
+            )
 
-    final_msg = messages[-1] if messages else None
-    answer = getattr(final_msg, "content", "") or ""
-
+    # 5. 最终返回
     return {
-        "answer": answer,
+        "query": query,
+        "answer": result["messages"][-1].content,
         "tool_calls_log": tool_calls_log,
+        "execution_trace": execution_trace,
         "model_used": settings.ollama_model_name,
     }
 

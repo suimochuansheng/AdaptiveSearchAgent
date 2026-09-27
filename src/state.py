@@ -26,6 +26,7 @@ def reduce_accum(
     """
     if right and isinstance(right[0], str) and right[0] == _RESET_SENTINEL:
         return []
+    # 如果 left 是 None（首次写入），就用空列表代替;  + right：把本次新值追加到旧值后面
     return (left or []) + right
 
 
@@ -37,11 +38,13 @@ class AgentState(TypedDict):
         iteration:      当前迭代轮次，从 0 开始递增。
         plan:           Planner 生成的搜索关键词列表。
         missing_info:   Evaluator 判定的信息缺失项。
+        user_feedback:  用户在缺失信息补全中断中提供的补充信息。
         retry_keywords: 基于缺失信息生成的补充搜索关键词。
         confidence_score: 结果置信度评分（0~1）。
         search_results: 累积搜索结果（普通 list，可直接赋值覆盖）。
         _search_accum:  并行 worker 临时累加器（自定义 reducer，支持信号清空）。
         final_report:   最终生成的结构化回答/报告。
+        hitl_decision:  高成本搜索前置确认结果（confirmed / cancelled）。
     """
 
     # 原始输入（全程只读）
@@ -59,6 +62,7 @@ class AgentState(TypedDict):
     # 结果评估
     confidence_score: float
     missing_info: str
+    user_feedback: str  # 用户在“缺失信息补全”中断中补充的信息（为空表示无补充）
 
     # 最终输出
     final_report: str
@@ -74,4 +78,5 @@ class AgentState(TypedDict):
     pending_keywords: list[str]
     _batch_keywords: list[str]
 
-    thread_id: str
+    # HITL 高成本搜索前置确认结果：confirmed=放行搜索 / cancelled=取消搜索
+    hitl_decision: str

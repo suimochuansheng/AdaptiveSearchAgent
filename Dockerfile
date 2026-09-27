@@ -8,6 +8,9 @@ WORKDIR /app
 
 FROM base AS deps
 COPY pyproject.toml poetry.lock ./
+# 配置 pip 源为清华镜像
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
 RUN poetry config virtualenvs.create false && poetry install --only main --no-interaction --no-ansi
 
 FROM base AS runtime

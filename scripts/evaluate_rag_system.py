@@ -23,7 +23,7 @@ import types
 from collections import Counter
 from pathlib import Path
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 # 确保项目根在 sys.path
 _PROJ = Path(__file__).resolve().parent.parent
@@ -35,11 +35,11 @@ load_dotenv(_PROJ / ".env")
 
 # ── Monkey-patch: 桥接 Ragas 0.4.x 硬依赖 ──
 import langchain_community.chat_models as _chat_models
-from langchain_google_vertexai import ChatVertexAI as _ChatVertexAI
+from langchain_google_vertexai import ChatVertexAI as _ChatVertexAI  # type: ignore[attr-defined]
 
-_chat_models.ChatVertexAI = _ChatVertexAI
+_chat_models.ChatVertexAI = _ChatVertexAI  # type: ignore[attr-defined]
 _vertexai_stub = types.ModuleType("langchain_community.chat_models.vertexai")
-_vertexai_stub.ChatVertexAI = _ChatVertexAI
+_vertexai_stub.ChatVertexAI = _ChatVertexAI  # type: ignore[attr-defined]
 sys.modules["langchain_community.chat_models.vertexai"] = _vertexai_stub
 
 # BGE Reranker 依赖（离线评估对比用）
@@ -69,17 +69,13 @@ QWEN_BASE_URL = settings.ALIYUN_QWEN_BASE_URL
 def _build_llm_and_embeddings(model_key: str = "nomic-embed"):
     """构建裁判员 LLM 与对齐的向量 Embedding 模型。"""
     qwen_client = OpenAI(base_url=QWEN_BASE_URL, api_key=QWEN_API_KEY)
-    # 获取思考深度配置，并传递给 llm_factory
-    reasoning_effort = getattr(settings, "ALIYUN_QWEN_MODEL_REASONING_EFFORT", "medium")
     llm = llm_factory(
         QWEN_MODEL,
         client=qwen_client,
         max_tokens=2048,
         temperature=0.0,
-        # 在这里添加参数
-        model_kwargs={
-            "reasoning_effort": reasoning_effort,
-            "enable_thinking": True,  # 评估场景建议开启
+        extra_body={  # 关闭思考模式
+            "enable_thinking": False,
         },
     )
 
@@ -144,19 +140,19 @@ def load_test_data(yaml_path: Path):
     return data, metadata_fields
 
 
-async def evaluate_rag(args=None) -> dict:
+async def evaluate_rag(args=None) -> dict:  # noqa: C901
     """离线评估 RAG 系统：检索上下文 → 模拟答案 → Ragas 指标（支持并发）。"""
     model_name = getattr(args, "model", "nomic-embed")
     top_k = getattr(args, "top_k", 3)
     max_workers = getattr(args, "max_workers", 4)
     eval_timeout = getattr(args, "timeout", 120)
-    kb_id = getattr(args, "kb_id", None)
+    kb_id = str(getattr(args, "kb_id", None) or "default")
     reranker = getattr(args, "reranker", "ms-marco")
 
     # BGE Reranker 模式下，先取更大候选池再精排回 top_k
     retrieval_top_k = top_k * 3 if reranker == "bge" else top_k
 
-    # 1. 加载 YAML 测试集
+    # 1. 加载 YAML 测试集--qa_dataset_v2.yaml
     dataset_path = _PROJ / "data" / "eval" / "qa_dataset_v2.yaml"
     test_data, _metadata_fields = load_test_data(dataset_path)
     logger.info(
@@ -466,7 +462,7 @@ def _parse_passages_from_context(context: str) -> list[str]:
         if not block:
             continue
         lines = block.split("\\n", 1)
-        if len(lines) >= 2:
+        if len(lines) >= 2:  # noqa: SIM108
             content = lines[1].strip()
         else:
             content = lines[0].strip()

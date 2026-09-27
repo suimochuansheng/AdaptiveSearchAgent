@@ -128,7 +128,8 @@ class TestStreamAgentNormalFlow:
         # status/kpi 写入思考 Step，final 写入主 Message
         assert thinking_step.stream_token.called
         assert "最终答案" in collected
-        assert output_msg.update.called
+        # final 内容通过 stream_token 逐步推送，不再调用 output_msg.update()
+        assert not output_msg.update.called
 
     @pytest.mark.asyncio
     async def test_仅kpi事件无final_流正常结束(self) -> None:

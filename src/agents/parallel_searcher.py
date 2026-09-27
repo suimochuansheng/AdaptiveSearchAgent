@@ -73,22 +73,24 @@ async def parallel_searcher(state: AgentState) -> dict:
 
 
 def route_to_search_workers(state: AgentState) -> list[Send] | str:
-    """条件边路由函数：根据 _batch_keywords 生成 Send 扇出任务。
-
-    由 add_conditional_edges("parallel_searcher", ...) 调用。
-    当有本批次关键词时返回 list[Send] 实现并行扇出；
-    无关键词时返回 "evaluator" 跳过搜索直接进入评估。
-
-    Args:
-        state: 当前全局状态（parallel_searcher 节点已更新 _batch_keywords）。
-
-    Returns:
-        list[Send] 或字符串 "evaluator"。
-    """
+    """条件边路由函数：根据 _batch_keywords 生成 Send 扇出任务。"""
     batch = state.get("_batch_keywords", [])
     if not batch:
         return "evaluator"
-    # print(f"路由函数生成 Send 任务，关键词批次: {batch}")
-    #
-    Sends = [Send("search_worker", {"keyword": kw}) for kw in batch]
+
+    # 从 state 中提取上下文
+    task_id = state.get("task_id", "unknown")
+    iteration = state.get("iteration", 0)
+
+    Sends = [
+        Send(
+            "search_worker",
+            {
+                "keyword": kw,
+                "task_id": task_id,
+                "iteration": iteration,
+            },
+        )
+        for kw in batch
+    ]
     return Sends
