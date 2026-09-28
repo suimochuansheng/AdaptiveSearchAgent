@@ -22,7 +22,7 @@ AdaptiveSearchAgent搜索对话过程GIF
 代码：`src/agents/parallel_searcher.py:75`、`src/graph_factory.py:33`
 
 ### 2. HITL 高成本前置确认
-首轮搜索前估算成本，达到阈值时用 `interrupt()` 暂停图执行，用户确认后才继续，取消则零费用。**阈值 5 个关键词、单价 0.02 元/词**。
+首轮搜索前估算成本，达到阈值时用 `interrupt()` 暂停图执行，用户确认后才继续，取消则零费用。**阈值 5 个关键词、单价 0.02 元/词**。（后续可按模型厂商实际费率动态估算）
 代码：`src/agents/hitl_confirm.py:38`、`src/graph_factory.py:87`
 
 ### 3. RRF + FlagReranker 多级检索（调用子服务）
@@ -82,27 +82,34 @@ flowchart TD
 
 ## 快速开始
 
+**前置依赖**：
+
+- Docker（用于 PostgreSQL + Redis）
+- Poetry（Python 依赖管理）
+- Ollama + 已下载模型 `qwen2.5:7b`
+- RAG 子服务已独立部署（见 [rag-ingest-gateway](https://github.com/suimochuansheng/rag-ingest-gateway)），与主服务放在同一父目录
+
 ```bash
-# 0. 启动依赖（PostgreSQL + Redis）
-docker-compose up -d
+# 0. 启动依赖服务（PostgreSQL + Redis）
+docker compose up -d db_dev db_test redis
 
-# 1. 启动 RAG 子服务（本地知识库检索，见 rag-ingest-gateway 仓库）
-cd ../rag-ingest-gateway && python3 api_main.py    # 端口 8100
-
-# 2. 启动主服务后端
-cd ../AdaptiveSearchAgent
+# 1. 安装 Python 依赖
 poetry install
-poetry run api                                     # 端口 8000
 
-# 3. 启动对话前端（可选）
+# 2. 启动主服务后端（端口 8000）
+poetry run uvicorn api_main:app --reload --port 8000
+
+# 3. 启动对话前端（可选，端口 8001）
 poetry run chainlit run frontend/app.py --port 8001
 ```
+
+> 健康检查：`GET http://localhost:8000/health` 应返回 `{"status":"ok"}`
 
 ---
 
 ## 项目结构
 
-```
+```bash
 AdaptiveSearchAgent/
 ├── api_main.py              # FastAPI SSE 流式入口（含分布式锁、任务状态机）
 ├── config.py                # Pydantic Settings 全局配置
