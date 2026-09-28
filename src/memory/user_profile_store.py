@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
+from psycopg_pool import AsyncConnectionPool as Pool
+
 from src.checkpointer import get_checkpointer
 from src.utils.logger import get_logger
 
@@ -20,39 +24,33 @@ class UserProfileStore:
     """
 
     def __init__(self) -> None:
-        self._pool = None
-        self._checkpointer = None
+        self._pool: Any = None
+        self._checkpointer: Any = None
 
-    async def _ensure_pool(self) -> None:
+    async def _ensure_pool(self) -> Pool:
         """延迟初始化：从全局 checkpointer 提取连接池引用。
 
         get_checkpointer() 为同步函数（返回 AsyncPostgresSaver 实例），
         因此不添加 await。若 checkpointer 尚未初始化，RuntimeError 会自然上抛。
         """
         if self._pool is not None:
-            return
+            return self._pool
         saver = get_checkpointer()
         # saver.conn 即 checkpointer 模块中创建的 AsyncConnectionPool
         self._pool = saver.conn
         self._checkpointer = saver
+        return self._pool
 
     async def get_profile(self, user_id: str) -> dict:
-        """获取用户画像，不存在时返回安全默认值。
-
-        Args:
-            user_id: 用户/线程唯一标识。
-
-        Returns:
-            字典永远包含 3 个键：preferred_language, answer_style, recent_topics。
-        """
-        await self._ensure_pool()
-        async with self._pool.connection() as conn, conn.cursor() as cur:
+        """获取用户画像，不存在时返回安全默认值。"""
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 "SELECT preferred_language, answer_style, recent_topics "
                 "FROM user_profiles WHERE user_id = %s",
                 (user_id,),
             )
-            row = await cur.fetchone()
+            row = cast(dict[str, Any] | None, await cur.fetchone())
 
         if row is None:
             return {
@@ -75,20 +73,9 @@ class UserProfileStore:
         answer_style: str | None = None,
         recent_topics: list[str] | None = None,
     ) -> None:
-        """插入或合并更新用户画像。
-
-        COALESCE(EXCLUDED.field, user_profiles.field) 策略：
-        - 传入非 None 值时更新对应字段
-        - 传入 None 时保留数据库中原值
-
-        Args:
-            user_id: 用户唯一标识。
-            preferred_language: 偏好语言（如 'zh', 'en'），None 保留原值。
-            answer_style: 回答风格（如 'detailed', 'concise', 'table'），None 保留原值。
-            recent_topics: 最近话题列表，None 保留原值。
-        """
-        await self._ensure_pool()
-        async with self._pool.connection() as conn:
+        """插入或合并更新用户画像。"""
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """

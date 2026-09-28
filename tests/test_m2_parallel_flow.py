@@ -348,7 +348,7 @@ class TestMultiWaveIntegration:
         assert result["iteration"] == 1  # evaluator 递增轮次
 
     @pytest.mark.asyncio
-    async def test_M2完整流程手动编排(self) -> None:
+    async def test_M2完整流程手动编排(self, monkeypatch) -> None:
         """手动编排 M2 全部节点协作流程，验证端到端行为。
 
         流程：planner → parallel_searcher → route_to_search_workers →
@@ -390,6 +390,9 @@ class TestMultiWaveIntegration:
                 new_callable=AsyncMock,
             ) as mock_writer_llm,
         ):
+            # 固定并发数为 2，确保 planner 生成的 limit*2 个关键词能触发两波搜索
+            # （planner 内部 plan[:5] 截断；生产默认 5 时关键词会被截断，无法两波）
+            monkeypatch.setattr(settings, "max_concurrent_searches", 2)
             limit = settings.max_concurrent_searches
             all_kw = [f"M2_KW{i}" for i in range(limit * 2)]
 

@@ -299,8 +299,8 @@ class TestRouteToSearchWorkers:
         assert len(result) == 2
         assert all(isinstance(s, Send) for s in result)
         assert result[0].node == "search_worker"
-        assert result[0].arg == {"keyword": "关键词A"}
-        assert result[1].arg == {"keyword": "关键词B"}
+        assert result[0].arg == {"keyword": "关键词A", "task_id": "test-id", "iteration": 0}
+        assert result[1].arg == {"keyword": "关键词B", "task_id": "test-id", "iteration": 0}
 
     def test_空批次关键词时返回evaluator(self) -> None:
         """验证 _batch_keywords 为空时返回 "evaluator" 字符串（跳过搜索）。"""

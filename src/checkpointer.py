@@ -80,7 +80,7 @@ def get_checkpointer() -> AsyncPostgresSaver:
     return _global_saver
 
 
-def get_business_pool() -> AsyncConnectionPool:
+def get_business_pool() -> AsyncConnectionPool[AsyncConnection[DictRow]]:
     """返回业务专用连接池（供 task_states 等查询使用）。"""
     if _business_pool is None:
         raise RuntimeError("业务连接池尚未初始化")

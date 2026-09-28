@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
 from dotenv import load_dotenv
 
 # 将项目根目录 .env 注入 os.environ（langfuse SDK 从环境变量读取配置）
@@ -98,10 +99,9 @@ def run_smoke_test() -> int:
     return 0
 
 
+@pytest.mark.e2e
 def test_langfuse_connection() -> None:
     """pytest 入口：未配置时跳过，配置了就绪时执行真实连通性测试。"""
-    import pytest
-
     ok, detail = _check_prerequisites()
     if not ok:
         pytest.skip(detail)

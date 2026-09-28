@@ -26,7 +26,7 @@ def client():
     # 关键：api_main.py 中使用了 `from src import checkpointer`，
     # 因此我们需要 mock `api_main.checkpointer` 模块及其 `_global_pool`
     with (
-        patch("api_main.checkpointer") as mock_checkpointer_mod,
+        patch("api_main.get_business_pool") as mock_get_pool,
         patch("api_main.redis_client") as mock_redis,
     ):
         # Mock Redis 锁（避免实际连接）
@@ -34,19 +34,13 @@ def client():
         mock_redis.lock.return_value.acquire = AsyncMock(return_value=True)
         mock_redis.lock.return_value.release = AsyncMock()
 
-        # Mock 数据库连接池（_global_pool）
+        # Mock 业务连接池（get_business_pool 返回）
         mock_pool = MagicMock()
         mock_conn = AsyncMock()
-        mock_cursor = AsyncMock()
-
-        # 配置连接池的上下文管理器链
+        mock_conn.execute = AsyncMock()
         mock_pool.connection.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
-        mock_conn.cursor.return_value.__aenter__.return_value = mock_cursor
-        mock_conn.execute = AsyncMock()  # 新增：模拟直接 execute 调用
-
-        # 将 mock 池赋值给 checkpointer 模块的 _global_pool
-        mock_checkpointer_mod._global_pool = mock_pool
+        mock_get_pool.return_value = mock_pool
 
         # 延迟导入 api_main，确保所有 patch 生效
         from api_main import app
@@ -62,8 +56,14 @@ def client():
 class TestPhase1Config:
     """验证 config.py 新增的 4 个配置项"""
 
-    def test_new_config_defaults(self):
+    def test_new_config_defaults(self, monkeypatch):
         from config import settings
+
+        # 覆盖本地 .env 的开关覆盖，验证 config.py 中的默认值（零破坏性）
+        monkeypatch.setattr(settings, "ENABLE_DYNAMIC_TOOLS", False)
+        monkeypatch.setattr(settings, "ENABLE_MEMORY", False)
+        monkeypatch.setattr(settings, "ENABLE_ASYNC_TASK", False)
+        monkeypatch.setattr(settings, "ASYNC_TASK_THRESHOLD_SECONDS", 120)
 
         assert hasattr(settings, "ENABLE_DYNAMIC_TOOLS")
         assert hasattr(settings, "ENABLE_MEMORY")
@@ -233,18 +233,16 @@ class TestPhase4AsyncAPI:
     def test_status_endpoint_returns_404_when_task_not_found(self, client):
         """任务不存在时返回 404"""
         # 模拟数据库查询返回 None
-        with patch("api_main.checkpointer") as mock_cp:
-            mock_cp._global_pool = MagicMock()
+        with patch("api_main.get_business_pool") as mock_get_pool:
+            mock_pool = MagicMock()
             mock_conn = AsyncMock()
             mock_cursor = AsyncMock()
             mock_cursor.fetchone.return_value = None
 
-            mock_cp._global_pool.connection.return_value.__aenter__ = AsyncMock(
-                return_value=mock_conn
-            )
-            mock_cp._global_pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
+            mock_pool.connection.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
             mock_conn.execute.return_value = mock_cursor
-            # 注意：这里 mock_conn.execute 返回 cursor，cursor.fetchone 返回 None
+            mock_get_pool.return_value = mock_pool
 
             response = client.get("/api/task/non_existent/status")
             assert response.status_code == 404
@@ -252,8 +250,8 @@ class TestPhase4AsyncAPI:
 
     def test_status_endpoint_returns_task_state_when_exists(self, client):
         """任务存在时返回状态信息"""
-        with patch("api_main.checkpointer") as mock_cp:
-            mock_cp._global_pool = MagicMock()
+        with patch("api_main.get_business_pool") as mock_get_pool:
+            mock_pool = MagicMock()
             mock_conn = AsyncMock()
             mock_cursor = AsyncMock()
             mock_cursor.fetchone.return_value = {
@@ -261,11 +259,10 @@ class TestPhase4AsyncAPI:
                 "state": "running",
                 "interrupt_time": None,
             }
-            mock_cp._global_pool.connection.return_value.__aenter__ = AsyncMock(
-                return_value=mock_conn
-            )
-            mock_cp._global_pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
+            mock_pool.connection.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
             mock_conn.execute.return_value = mock_cursor
+            mock_get_pool.return_value = mock_pool
 
             response = client.get("/api/task/task_123/status")
             assert response.status_code == 200
@@ -275,19 +272,18 @@ class TestPhase4AsyncAPI:
 
     def test_result_endpoint_returns_202_when_task_not_completed(self, client):
         """任务未完成时返回 202（仍在处理）"""
-        with patch("api_main.checkpointer") as mock_cp:
-            mock_cp._global_pool = MagicMock()
+        with patch("api_main.get_business_pool") as mock_get_pool:
+            mock_pool = MagicMock()
             mock_conn = AsyncMock()
             mock_cursor = AsyncMock()
             mock_cursor.fetchone.return_value = {
                 "thread_id": "task_123",
                 "state": "running",
             }
-            mock_cp._global_pool.connection.return_value.__aenter__ = AsyncMock(
-                return_value=mock_conn
-            )
-            mock_cp._global_pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
+            mock_pool.connection.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
             mock_conn.execute.return_value = mock_cursor
+            mock_get_pool.return_value = mock_pool
 
             response = client.get("/api/task/task_123/result")
             assert response.status_code == 202
@@ -296,22 +292,21 @@ class TestPhase4AsyncAPI:
     def test_result_endpoint_returns_final_report_when_completed(self, client):
         """任务完成时返回最终报告"""
         with (
-            patch("api_main.checkpointer") as mock_cp,
+            patch("api_main.get_business_pool") as mock_get_pool,
             patch("api_main.get_graph") as mock_get_graph,
         ):
-            # Mock checkpointer 返回 completed 状态
-            mock_cp._global_pool = MagicMock()
+            # Mock get_business_pool 返回 completed 状态
+            mock_pool = MagicMock()
             mock_conn = AsyncMock()
             mock_cursor = AsyncMock()
             mock_cursor.fetchone.return_value = {
                 "thread_id": "task_123",
                 "state": "completed",
             }
-            mock_cp._global_pool.connection.return_value.__aenter__ = AsyncMock(
-                return_value=mock_conn
-            )
-            mock_cp._global_pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
+            mock_pool.connection.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+            mock_pool.connection.return_value.__aexit__ = AsyncMock(return_value=None)
             mock_conn.execute.return_value = mock_cursor
+            mock_get_pool.return_value = mock_pool
 
             # Mock graph.aget_state 返回最终报告
             mock_state = AsyncMock()
