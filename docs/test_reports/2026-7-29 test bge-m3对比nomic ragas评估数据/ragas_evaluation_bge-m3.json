@@ -1,0 +1,32 @@
+{
+  "model_evaluated": "bge-m3",
+  "total_questions": 20,
+  "max_workers": 4,
+  "timeout_seconds": 120,
+  "elapsed_seconds": {
+    "retrieval": 55.3,
+    "evaluation": 3743.7,
+    "total": 3799.1
+  },
+  "retrieval_errors": 0,
+  "metrics": {
+    "context_recall": {
+      "mean": 0.3,
+      "median": 0.0,
+      "min": 0.0,
+      "max": 1.0
+    },
+    "faithfulness": {
+      "mean": 0.9875,
+      "median": 1.0,
+      "min": 0.75,
+      "max": 1.0
+    },
+    "answer_relevancy": {
+      "mean": 0.2837,
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.9746
+    }
+  }
+}
