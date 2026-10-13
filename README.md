@@ -38,6 +38,10 @@ LLM 主模型 Ollama 失败后指数退避重试、自动切换 DeepSeek；LLM �
 会话级 Redis 锁防止同一会话并发重复执行（含僵尸锁自愈）；数据库连接池拆成 Checkpointer 专用池 + 业务池隔离。**锁 TTL 600 秒、Saver 池 max10 / 业务池 max5**。
 代码：`api_main.py:238`、`src/checkpointer.py:29`
 
+### 6. ReAct 工具动态路由（bind_tools + ToolNode）
+基于 LangGraph 标准工具调用协议，模型自主决策调用 `search_knowledge`（内部 RAG）/ `search_tavily`（互联网）/ `calculator`（数学计算），支持单工具直答与「先搜后算」多工具链式组合，并返回完整执行轨迹。由 `ENABLE_DYNAMIC_TOOLS` 开关零破坏性启用。
+代码：`src/agents/tool_demo.py:57`、`api_main.py:607`
+
 ---
 
 ## 量化结果
@@ -70,6 +74,83 @@ flowchart TD
 ```
 
 > search_worker 通过 HTTP 调用 RAG 子服务（rag-ingest-gateway）做本地知识库检索。
+
+---
+
+## 工具动态路由（ReAct Demo）
+
+主流程之外提供一套独立的 ReAct 工具调用演示模块，验证 LangGraph `bind_tools` + `ToolNode` 标准协议下模型「自主选工具 → 工具执行 → 结果回灌 → 继续推理」的完整闭环。默认关闭，开启后新增 `POST /demo/tools` 演示端点（`src/agents/tool_demo.py`）。
+
+```mermaid
+flowchart TD
+    U[用户输入] --> AG[agent 节点<br/>ChatOllama.bind_tools 绑定 3 个工具]
+
+    subgraph TN[ToolNode 工具执行器]
+        T1[search_knowledge<br/>内部 RAG 知识库]
+        T2[search_tavily<br/>Tavily 互联网搜索]
+        T3[calculator<br/>安全数学计算]
+    end
+
+    AG --> RC{最后一条消息<br/>含 tool_calls?}
+    RC -->|否| OUT[返回最终答案]
+    RC -->|是| TN
+    TN -->|ToolMessage 结果回灌| AG
+```
+
+**自主决策原则**（System Prompt 注入）：
+
+| 问题类型 | 路由到 |
+|---|---|
+| 内部文档 / 产品问题 | `search_knowledge` |
+| 实时新闻 / 公开信息 | `search_tavily` |
+| 纯数学计算 | `calculator` |
+| 复杂问题 | 多工具链式组合 |
+
+**面试演示：先搜后算的多步 ReAct 轨迹**（Prompt 见 `api_main.py:588`）：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant API as POST /demo/tools
+    participant AG as agent 节点<br/>bind_tools 模型
+    participant TN as ToolNode
+    participant TAV as search_tavily
+    participant CAL as calculator
+
+    U->>API: 请先搜索 OpenAI 2025 年各季度营收，<br/>再用 calculator 计算总和
+    API->>AG: graph.ainvoke(messages)
+    AG->>AG: 规划：先搜 4 个季度，再求和
+    AG->>TN: 发起 tool_call：search_tavily(OpenAI 2025 Q1 revenue)
+    TN->>TAV: HTTP 搜索
+    TAV-->>TN: Q1 营收文本
+    TN-->>AG: ToolMessage 回灌
+    loop Q2 ~ Q4（循环 3 次）
+        AG->>TN: 发起 tool_call：search_tavily(OpenAI 2025 Qn revenue)
+        TN->>TAV: HTTP 搜索
+        TAV-->>AG: ToolMessage 回灌
+    end
+    AG->>TN: 发起 tool_call：calculator(Q1+Q2+Q3+Q4)
+    TN->>CAL: 安全计算
+    CAL-->>TN: 总和结果
+    TN-->>AG: ToolMessage 回灌
+    AG-->>API: 最终中文答案（无 tool_calls，路由到 END）
+    API-->>U: 最终回复 + 完整执行轨迹 JSON
+```
+
+**启用方式**：
+
+```bash
+# .env 中开启（默认 False，零破坏性）
+ENABLE_DYNAMIC_TOOLS=True
+
+# 演示请求
+curl -X POST http://localhost:8000/demo/tools \
+  -H "Content-Type: application/json" \
+  -d '{"query": "请先搜索 OpenAI 2025 年各季度营收，然后把四个季度的数字加起来，用 calculator 计算总和，最后用中文回答。"}'
+```
+
+> 演示图懒加载为单例缓存（`api_main.py:597`），端点返回每条消息的执行轨迹（用户输入 / AI 工具调用 / 工具结果 / 最终回复），便于面试现场直观展示 ReAct 推理过程。
 
 ---
 
@@ -117,7 +198,7 @@ AdaptiveSearchAgent/
 │   ├── state.py             # AgentState + 自定义 reducer（哨兵清零）
 │   ├── graph_factory.py     # LangGraph 图构建 + 条件路由
 │   ├── checkpointer.py      # AsyncPostgresSaver + 双连接池
-│   ├── agents/              # 5 个节点：planner/hitl_confirm/parallel_searcher/search_worker/evaluator/writer
+│   ├── agents/              # 6 个核心节点（planner/hitl_confirm/parallel_searcher/search_worker/evaluator/writer）+ tool_demo ReAct 演示
 │   ├── tools/               # RAG(HTTP)/Tavily/calculator
 │   └── utils/               # LLM 备援、JSON 容错、指标、日志
 ├── tests/                   # 14 个测试文件

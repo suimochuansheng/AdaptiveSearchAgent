@@ -29,8 +29,9 @@ async def evaluator(state: AgentState, config: RunnableConfig | None = None) -> 
     new_results = state.get("_search_accum", [])
     results = state.get("search_results", []) + new_results
 
+    # 每条内容截断 500 字符防过长；取最新 5 条结果（MVP 阶段策略）
     results_summary = "\n\n".join(
-        f"关键词：{r['keyword']}\n内容：{r['content'][:500]}" for r in results[:5]
+        f"关键词：{r['keyword']}\n内容：{r['content'][:500]}" for r in results[-5:]
     )
 
     prompt = f"""用户问题：{query}

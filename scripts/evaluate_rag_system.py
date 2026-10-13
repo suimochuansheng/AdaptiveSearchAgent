@@ -152,8 +152,14 @@ async def evaluate_rag(args=None) -> dict:  # noqa: C901
     # BGE Reranker 模式下，先取更大候选池再精排回 top_k
     retrieval_top_k = top_k * 3 if reranker == "bge" else top_k
 
-    # 1. 加载 YAML 测试集--qa_dataset_v2.yaml
-    dataset_path = _PROJ / "data" / "eval" / "qa_dataset_v2.yaml"
+    # 1. 加载 YAML 测试集（默认 qa_dataset_v2.yaml，可用 --dataset 指定）
+    dataset_arg = getattr(args, "dataset", None)
+    if dataset_arg:
+        dataset_path = Path(dataset_arg)
+        if not dataset_path.is_absolute():
+            dataset_path = _PROJ / dataset_path
+    else:
+        dataset_path = _PROJ / "data" / "eval" / "qa_dataset_v2.yaml"
     test_data, _metadata_fields = load_test_data(dataset_path)
     logger.info(
         "加载 %d 条测试问题（模型: %s, top_k: %d, max_workers: %d, timeout: %ds）",
@@ -179,9 +185,14 @@ async def evaluate_rag(args=None) -> dict:  # noqa: C901
 
         logger.info("[%d/%d] 检索并生成回答: %s", idx + 1, len(test_data), question[:50])
 
-        # A. 检索上下文
+        # A. 检索上下文（hybrid=BM25+向量RRF，跳过网关侧 Reranker，由本脚本离线 BGE 精排）
         context = await search_knowledge(
-            question, top_k=retrieval_top_k, kb_id=kb_id, model=model_name
+            question,
+            top_k=retrieval_top_k,
+            kb_id=kb_id,
+            model=model_name,
+            search_mode="hybrid",
+            skip_reranker=True,
         )
 
         # BGE Reranker 离线重排（解析格式化字符串 → 精排 → 重建上下文）
@@ -395,6 +406,12 @@ async def main():
         default="ms-marco",
         choices=["ms-marco", "bge"],
         help="指定 Reranker 模型用于离线对比评估（ms-marco / bge）",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="指定测试集 YAML 路径（默认 data/eval/qa_dataset_v2.yaml）",
     )
     args = parser.parse_args()
     await evaluate_rag(args=args)
