@@ -4,7 +4,7 @@
 
 ---
 
-AdaptiveSearchAgent搜索对话过程GIF
+AdaptiveSearchAgent搜索对话过程GIF（GIF加载慢，亦可进docs/screenshots/adaptive.gif 查看）
 ![对话演示](docs/screenshots/adaptive.gif)
 
 ---
