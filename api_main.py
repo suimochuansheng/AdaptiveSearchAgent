@@ -91,6 +91,13 @@ class DemoRequest(BaseModel):
     model: str | None = None  # 预留字段：当前 demo 图固定使用 settings.ollama_model_name
 
 
+class ConversationRequest(BaseModel):
+    """会话式 Agent（阶段 A）请求体。"""
+
+    thread_id: str  # 会话唯一标识（同一 thread_id 多轮对话自动衔接）
+    message: str  # 本轮用户消息
+
+
 # ---------- PostgreSQL 任务状态表管理 ----------
 async def ensure_task_states_table():
     """确保 task_states 表存在，用于记录每个 thread_id 的执行状态"""
@@ -580,6 +587,88 @@ async def get_status(thread_id: str):
 async def health_check():
     """简单健康检查，确认服务存活"""
     return {"status": "ok", "message": "FastAPI + LangGraph 集成运行中"}
+
+
+# ===== 会话式 Agent 端点（阶段 A：workflow 降级为工具后的产品主干） =====
+
+# 会话式 Agent 图全局缓存（懒加载单例，复用全局 checkpointer 实现多轮衔接）
+_conversation_graph = None
+
+
+async def get_conversation_graph():
+    """返回缓存的会话式 Agent 图（首次调用时构建，接入全局 checkpointer）。"""
+    global _conversation_graph
+    if _conversation_graph is None:
+        from src.checkpointer import get_checkpointer
+        from src.conversation_graph import build_conversation_graph
+
+        saver = get_checkpointer()
+        _conversation_graph = build_conversation_graph(checkpointer=saver)
+    return _conversation_graph
+
+
+@app.post("/chat/conversation")
+async def chat_conversation(request: Request, body: ConversationRequest):
+    """会话式 Agent 端点（SSE 流式）。
+
+    - 同一 thread_id 多轮对话自动衔接（MessagesState + checkpointer）；
+    - 复用与 workflow 端点相同的 Redis 会话锁与 task_states 状态机；
+    - 工具自主选择：search_knowledge / search_tavily / calculator / deep_research。
+    """
+    thread_id = body.thread_id
+
+    # 会话状态校验（与 /chat/stream 同款逻辑的简化版）
+    status = await get_task_state(thread_id)
+    if status == "running":
+        raise HTTPException(429, "该会话正在执行中，请稍后再试")
+
+    lock = redis_client.lock(f"agent_lock:{thread_id}", timeout=600)
+    acquired = await lock.acquire(blocking=False)
+    if not acquired:
+        # 僵尸锁自愈：任务不在运行中但锁残留 → 删除重试
+        await redis_client.delete(f"agent_lock:{thread_id}")
+        acquired = await lock.acquire(blocking=False)
+        if not acquired:
+            raise HTTPException(429, "该会话正忙，请稍后再试")
+
+    async def event_generator():
+        final_state = None
+        try:
+            await set_task_state(thread_id, "running")
+            graph = await get_conversation_graph()
+            config = {"configurable": {"thread_id": thread_id}}
+
+            # stream_mode="values"：每个 superstep 吐一次全量状态
+            async for event in graph.astream(
+                {"messages": [HumanMessage(content=body.message)]},
+                config=config,
+                stream_mode="values",
+            ):
+                if await request.is_disconnected():
+                    break
+                final_state = event
+
+            # 循环结束条件：最后一条 AI 消息不含 tool_calls
+            answer = ""
+            if final_state:
+                messages = final_state.get("messages", [])
+                if messages:
+                    answer = str(messages[-1].content)
+            yield f"data: {json.dumps({'type': 'final', 'content': answer})}\n\n"
+            await set_task_state(thread_id, "completed")
+
+        except GeneratorExit:
+            logger.info("SSE 连接被客户端关闭 (GeneratorExit), thread_id=%s", thread_id)
+            return
+        except Exception as e:
+            logger.exception("会话式 Agent 执行错误")
+            yield f"data: {json.dumps({'type': 'error', 'message': f'服务异常：{str(e)}'})}\n\n"
+            await set_task_state(thread_id, "failed")
+        finally:
+            if acquired:
+                await lock.release()
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # ===== ReAct 工具调用演示端点（ENABLE_DYNAMIC_TOOLS 控制启用） =====

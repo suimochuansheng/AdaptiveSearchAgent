@@ -62,8 +62,15 @@ def route_after_hitl(state: AgentState) -> str:
     return "parallel_searcher"
 
 
-def build_graph(checkpointer: BaseCheckpointSaver | None = None):
-    """构建 LangGraph 工作流（含高成本搜索前置 HITL 确认）。
+def build_graph(
+    checkpointer: BaseCheckpointSaver | None = None,
+    include_hitl: bool = True,
+):
+    """构建 LangGraph 工作流（默认含高成本搜索前置 HITL 确认）。
+
+    include_hitl=False 时跳过 hitl_confirm 节点（planner → parallel_searcher 直连）。
+    用途：deep_research 工具把本图当作子流程调用时，图内的 interrupt 无法与
+    外层会话循环的人机交互兼容，因此工具版图自动放行、由外层负责 HITL。
 
     图结构：
         planner → hitl_confirm → parallel_searcher → workers → evaluator
@@ -84,7 +91,8 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     # 注册节点
     builder.add_node("planner", planner)
-    builder.add_node("hitl_confirm", hitl_confirm)
+    if include_hitl:
+        builder.add_node("hitl_confirm", hitl_confirm)
     builder.add_node("parallel_searcher", parallel_searcher)
     builder.add_node("search_worker", search_worker)
     builder.add_node("evaluator", evaluator)
@@ -92,17 +100,20 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     # 图结构
     builder.set_entry_point("planner")
-    builder.add_edge("planner", "hitl_confirm")
-
-    # hitl_confirm → 条件路由：确认（或无需确认）→ parallel_searcher；取消 → writer
-    builder.add_conditional_edges(
-        "hitl_confirm",
-        route_after_hitl,
-        {
-            "parallel_searcher": "parallel_searcher",
-            "writer": "writer",
-        },
-    )
+    if include_hitl:
+        builder.add_edge("planner", "hitl_confirm")
+        # hitl_confirm → 条件路由：确认（或无需确认）→ parallel_searcher；取消 → writer
+        builder.add_conditional_edges(
+            "hitl_confirm",
+            route_after_hitl,
+            {
+                "parallel_searcher": "parallel_searcher",
+                "writer": "writer",
+            },
+        )
+    else:
+        # 工具版图：跳过 HITL，直连并行搜索（外层会话循环负责人工确认）
+        builder.add_edge("planner", "parallel_searcher")
 
     # parallel_searcher → 条件扇出到 workers 或直接 evaluator
     builder.add_conditional_edges(
