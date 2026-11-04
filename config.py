@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     context_history_budget: int = 3000
     # 更早轮次压缩成摘要的预算
     context_summary_budget: int = 800
+    # 单条工具消息进 prompt 的预算（超出走段落重要度压缩）
+    tool_output_token_budget: int = 1200
+    # 工具输出超过该 token 数就落盘，prompt 只留压缩版 + 指针（Offload）
+    offload_token_threshold: int = 3000
+    offload_enabled: bool = True
+    # 回读卸载文件时的预算：要比 prompt 里的压缩版更大，否则"回读"等于又压一遍
+    offload_read_token_budget: int = 3000
 
     # OpenAI 兼容 API 地址（备援使用）
     openai_base_url: str = ""

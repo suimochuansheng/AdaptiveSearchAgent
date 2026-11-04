@@ -21,13 +21,17 @@ import uuid
 from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import (
+    RunnableConfig,  # noqa: TC002 - LangGraph 运行期按签名注入 config
+)
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from config import settings
-from src.context_manager import build_context, compress_tool_output
+from src.context_manager import build_context
 from src.tools.calculator import calculate_math
+from src.tools.offload import read_offload, shrink_tool_message
 from src.tools.rag import search_knowledge
 from src.tools.search import search_tavily
 from src.utils.logger import get_logger
@@ -38,9 +42,6 @@ if TYPE_CHECKING:
     from src.state import AgentState
 
 logger = get_logger()
-
-# deep_research 回灌报告的 token 预算（阶段 B1：段落重要度压缩替代从头硬截断）
-_DEEP_RESEARCH_TOKEN_BUDGET = 2000
 
 
 async def calculator(expression: str) -> str:
@@ -112,12 +113,13 @@ async def _run_deep_research(query: str) -> str:
     report = final_state.get("final_report", "")
     if not report:
         return "深度调研未能生成报告，请换一种问法或拆成更小的问题。"
-    # 阶段 B1：按段落重要度压缩（末段/数字/结论优先），不再从头硬截断
-    return compress_tool_output(report, _DEEP_RESEARCH_TOKEN_BUDGET)
+    # 原样返回：压缩 / 落盘统一由 tools 节点的 shrink_tool_message 处理
+    # （这样所有工具走同一条收口逻辑，且原始报告会先落盘再压缩，细节可回读）
+    return report
 
 
 # ── 工具列表：模型每轮只能从这 4 个工具里选 ──────────────────────────────
-TOOLS = [search_knowledge, search_tavily, calculator, deep_research]
+TOOLS = [search_knowledge, search_tavily, calculator, deep_research, read_offload]
 
 # ── System Prompt（稳定区：角色 + 工具索引 + 判断规则，阶段 B 会做预算管理）──
 SYSTEM_PROMPT = """你是内部知识助手，可以自主选择工具完成任务：
@@ -126,12 +128,14 @@ search_knowledge(query): 查询内部知识库（文档/FAQ）
 search_tavily(keyword): 搜索互联网实时信息
 calculator(expression): 计算数学表达式（如 "2 + 3 * sin(0.5)"）
 deep_research(query): 对复杂问题做多角度深度调研，生成带来源的调研报告
+read_offload(pointer, keyword): 回读之前被卸载的完整工具输出（可按关键词取段落）
 
 判断原则：
 - 简单事实 / 内部文档问题 → 用 search_knowledge，根据结果回答
 - 实时新闻 / 公开信息 → 用 search_tavily
 - 纯数学计算 → 仅用 calculator
 - 需要多角度对比、综合调研的复杂问题 → 用 deep_research
+- 工具输出里有"[已卸载]"标记时，需要更多细节就用 read_offload 按 pointer 回读
 - 回答只基于工具返回的结果；工具没有的信息，明确说不知道，不要编造
 """
 
@@ -184,9 +188,21 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
             update["summary_upto"] = built.summary_upto
         return update
 
+    tool_node = ToolNode(TOOLS)
+
+    async def tools_node(state: ConversationState, config: RunnableConfig) -> dict:
+        """执行工具，并把结果收口到 prompt 预算内（超预算压缩，超大落盘 + 指针）。"""
+        result = await tool_node.ainvoke(state)
+        thread_id = str((config.get("configurable") or {}).get("thread_id", "default"))
+        return {
+            "messages": [
+                shrink_tool_message(message, thread_id=thread_id) for message in result["messages"]
+            ]
+        }
+
     graph = StateGraph(ConversationState)
     graph.add_node("agent", agent_node)
-    graph.add_node("tools", ToolNode(TOOLS))
+    graph.add_node("tools", tools_node)
 
     graph.add_edge(START, "agent")
     graph.add_conditional_edges(

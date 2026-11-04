@@ -73,8 +73,11 @@ async def test_deep_research_calls_tool_mode_graph_with_isolated_thread(monkeypa
     assert cg._deep_research_in_flight is False
 
 
-async def test_deep_research_preserves_tail_conclusion(monkeypatch) -> None:
-    """超长报告按段落重要度压缩：末段结论与数字必须保住，且落在预算内（阶段 B1）。"""
+async def test_deep_research_returns_raw_report(monkeypatch) -> None:
+    """调研工具原样返回报告：压缩与落盘统一由 tools 节点收口（阶段 B3）。
+
+    这样原始报告先进 Offload 文件，prompt 里才拿压缩版——细节仍可回读。
+    """
     filler = "检索到一段与问题关系不大的叙述，用于填充篇幅。" * 8
     report = "\n\n".join(
         [f"第 {i} 段：{filler}" for i in range(30)]
@@ -85,10 +88,8 @@ async def test_deep_research_preserves_tail_conclusion(monkeypatch) -> None:
 
     result = await cg.deep_research("对比 A 和 B")
 
-    assert "结论：A 总成本 1200 万元" in result
-    assert "1500" in result
-    assert "省略" in result
-    assert estimate_tokens(result) <= cg._DEEP_RESEARCH_TOKEN_BUDGET + 120
+    assert result == report
+    assert estimate_tokens(result) > 3000  # 确实超了落盘阈值，交给 tools 节点处理
 
 
 async def test_deep_research_turns_exception_into_tool_text(monkeypatch) -> None:
@@ -141,7 +142,13 @@ def test_build_graph_pins_num_ctx(monkeypatch) -> None:
     cg.build_conversation_graph()
 
     assert captured["num_ctx"] == settings.ollama_num_ctx >= 8192
-    assert captured["tools"] == ["search_knowledge", "search_tavily", "calculator", "deep_research"]
+    assert captured["tools"] == [
+        "search_knowledge",
+        "search_tavily",
+        "calculator",
+        "deep_research",
+        "read_offload",
+    ]
 
 
 def test_conversation_state_tracks_summary_ledger() -> None:
@@ -186,3 +193,34 @@ async def test_agent_node_summarizes_long_history(monkeypatch) -> None:
     assert result["context_summary"].startswith("决定：用 A 方案")
     assert result["summary_upto"] > 0
     assert result["messages"][-1].content == "最终回答"
+
+
+async def test_tools_node_runs_and_shrinks(monkeypatch) -> None:
+    """工具节点跑通：叫一次 calculator → 真实执行 → 结果回到会话（不需要 LLM）。"""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    class _ToolCallingModel:
+        def __init__(self, **kwargs: Any) -> None:
+            self.calls = 0
+
+        def bind_tools(self, tools: Any) -> "_ToolCallingModel":
+            return self
+
+        async def ainvoke(self, messages: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "calculator", "args": {"expression": "1+1"}, "id": "c1"}],
+                )
+            return AIMessage("答案是 2")
+
+    monkeypatch.setattr(cg, "ChatOllama", _ToolCallingModel)
+    graph = cg.build_conversation_graph()
+
+    result = await graph.ainvoke({"messages": [HumanMessage("1+1 等于几")]})
+
+    tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert tool_messages, "calculator 应该被执行"
+    assert "2" in str(tool_messages[0].content)
+    assert result["messages"][-1].content == "答案是 2"
