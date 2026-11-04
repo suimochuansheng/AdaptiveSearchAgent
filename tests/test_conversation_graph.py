@@ -142,3 +142,47 @@ def test_build_graph_pins_num_ctx(monkeypatch) -> None:
 
     assert captured["num_ctx"] == settings.ollama_num_ctx >= 8192
     assert captured["tools"] == ["search_knowledge", "search_tavily", "calculator", "deep_research"]
+
+
+def test_conversation_state_tracks_summary_ledger() -> None:
+    """压缩账本字段必须在 state schema 里，否则摘要每轮重算、旧会话也无法续跑。"""
+    assert "messages" in cg.ConversationState.__annotations__
+    assert "context_summary" in cg.ConversationState.__annotations__
+    assert "summary_upto" in cg.ConversationState.__annotations__
+
+
+async def test_agent_node_summarizes_long_history(monkeypatch) -> None:
+    """端到端（无真实 LLM）：长历史触发摘要并写回账本，旧消息不再原样进 prompt。"""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from config import settings
+
+    monkeypatch.setattr(settings, "context_history_budget", 200)
+    monkeypatch.setattr(settings, "context_summary_budget", 200)
+
+    summary_prompts: list[str] = []
+
+    class _DummyModel:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def bind_tools(self, tools: Any) -> "_DummyModel":
+            return self
+
+        async def ainvoke(self, messages: Any) -> Any:
+            system_text = str(messages[0].content)
+            if "对话压缩器" in system_text:
+                summary_prompts.append(system_text)
+                return AIMessage("决定：用 A 方案；关键数字：1200")
+            return AIMessage("最终回答")
+
+    monkeypatch.setattr(cg, "ChatOllama", _DummyModel)
+    graph = cg.build_conversation_graph()
+
+    history = [HumanMessage(content=f"第 {i} 条：" + "内容" * 40) for i in range(30)]
+    result = await graph.ainvoke({"messages": history})
+
+    assert summary_prompts, "长历史应该触发一次摘要调用"
+    assert result["context_summary"].startswith("决定：用 A 方案")
+    assert result["summary_upto"] > 0
+    assert result["messages"][-1].content == "最终回答"

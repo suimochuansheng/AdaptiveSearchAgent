@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     # 这里固定 8192（3080 10G 上 qwen 7B INT4 + KV cache 可承载）。
     ollama_num_ctx: int = 8192
 
+    # ── 阶段 B：上下文管理预算（tokens）──
+    # 关闭后 build_context 短路成"system + 全量历史"，行为回退到阶段 A
+    context_management_enabled: bool = True
+    # 最近若干轮保留原文的预算
+    context_history_budget: int = 3000
+    # 更早轮次压缩成摘要的预算
+    context_summary_budget: int = 800
+
     # OpenAI 兼容 API 地址（备援使用）
     openai_base_url: str = ""
 

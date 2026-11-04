@@ -14,7 +14,14 @@
 
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import dataclass
+from typing import Any
+
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+
+from src.utils.logger import get_logger
 
 # 中日韩字符：按 1 token/字估算（保守，宁可高估）
 _CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -176,3 +183,172 @@ def compress_tool_output(text: str, token_budget: int) -> str:
     if estimate_tokens(text) <= token_budget:
         return text
     return select_paragraphs(text, token_budget)
+
+
+# ── 历史压缩（阶段 B2）───────────────────────────────────────────────────
+
+logger = get_logger()
+
+SUMMARY_PROMPT = """你是对话压缩器。从给定的对话记录中提取四类信息，输出中文要点：
+1. 已经做出的决定（用户确认过的结论、选择、参数）
+2. 尚未解决的问题（还没答完、待补充的信息）
+3. 关键数字与结论（金额、数量、比较结果、日期）
+4. 用户明确提出的要求或偏好
+
+规则：
+- 只输出这四节，用"决定 / 未解决 / 关键数字 / 用户要求"作小标题；
+- 不要寒暄、不要复述过程、不要评论；
+- 没有内容的节写"无"；
+- 若给出"已有摘要"，把它与本轮新增对话合并成一份新摘要，不要丢已有事实。"""
+
+
+@dataclass
+class ContextBuild:
+    """一次 prompt 组装的产物。
+
+    Attributes:
+        messages: 真正发给模型的列表（稳定区 + 旧轮摘要 + 最近原文）。
+        summary: 更新后的摘要（没有新增归纳时保持原值）。
+        summary_upto: 摘要已经覆盖到第几条消息。
+        summarized: 本轮是否发生了新的归纳（决定要不要写回 state）。
+    """
+
+    messages: list[BaseMessage]
+    summary: str
+    summary_upto: int
+    summarized: bool
+
+
+def _content_text(message: BaseMessage) -> str:
+    """把消息内容统一取成字符串（多模态 content 是 list）。"""
+    content: Any = message.content
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=False)
+
+
+def message_tokens(message: BaseMessage) -> int:
+    """单条消息的 token 估算（正文 + 工具调用参数）。"""
+    total = estimate_tokens(_content_text(message))
+    for call in getattr(message, "tool_calls", None) or []:
+        total += estimate_tokens(json.dumps(call, ensure_ascii=False))
+    return total
+
+
+def plan_window(messages: list[BaseMessage], token_budget: int) -> int:
+    """从末尾往前累计，返回"从这里开始保留原文"的下标。
+
+    至少保留最后一条消息，避免窗口算成空。
+    """
+    if not messages:
+        return 0
+    used = 0
+    keep_from = len(messages) - 1
+    for idx in range(len(messages) - 1, -1, -1):
+        cost = message_tokens(messages[idx])
+        if used + cost > token_budget and idx < len(messages) - 1:
+            break
+        used += cost
+        keep_from = idx
+    return keep_from
+
+
+def fallback_summary(messages: list[BaseMessage], *, max_chars: int = 600) -> str:
+    """规则兜底摘要：每条取开头一句 + 命中的数字，防止摘要调用失败时信息全丢。"""
+    parts: list[str] = []
+    for message in messages:
+        text = " ".join(_content_text(message).split())
+        if not text:
+            continue
+        numbers = _NUMBER.findall(text)[:5]
+        piece = text[:80]
+        if numbers:
+            piece += f"（数字：{', '.join(numbers)}）"
+        parts.append(piece)
+    return "；".join(parts)[:max_chars]
+
+
+async def summarize_history(
+    llm: Any,
+    older: list[BaseMessage],
+    *,
+    previous_summary: str = "",
+    max_tokens: int = 800,
+) -> str:
+    """把旧轮次压成摘要；失败时退化为规则摘要，绝不抛异常打断会话。"""
+    if not older:
+        return previous_summary
+
+    transcript = "\n".join(f"- {m.type}: {_content_text(m)[:400]}" for m in older)
+    previous = f"【已有摘要】\n{previous_summary}\n\n" if previous_summary else ""
+    prompt = [
+        SystemMessage(content=SUMMARY_PROMPT),
+        HumanMessage(content=f"{previous}【新增对话】\n{transcript}"),
+    ]
+
+    summary = ""
+    try:
+        response = await llm.ainvoke(prompt)
+        summary = str(response.content).strip()
+    except Exception:  # noqa: BLE001 - 摘要失败不能影响主回答
+        logger.warning("历史摘要调用失败，退化为规则摘要", exc_info=True)
+
+    if not summary:
+        summary = fallback_summary(older)
+        if previous_summary:
+            summary = f"{previous_summary}\n{summary}"
+    # 摘要本身也要守预算，否则旧轮压缩完仍然超窗
+    return compress_tool_output(summary, max_tokens)
+
+
+async def build_context(
+    *,
+    llm: Any,
+    messages: list[BaseMessage],
+    system_prompt: str,
+    summary: str = "",
+    summary_upto: int = 0,
+    history_budget: int,
+    summary_budget: int,
+    enabled: bool = True,
+) -> ContextBuild:
+    """组装发给模型的 prompt：稳定区 + 旧轮摘要 + 最近原文。
+
+    Args:
+        llm: 用于生成摘要的模型（传 None 则用规则兜底，且不会丢消息）。
+        messages: 全量对话历史（state 里的 messages）。
+        system_prompt: 稳定区内容，永不压缩。
+        summary: 上一轮的摘要。
+        summary_upto: 摘要已覆盖到的消息下标。
+        history_budget: 最近原文的 token 预算。
+        summary_budget: 摘要的 token 预算。
+        enabled: 关掉则短路成"system + 全量历史"，回退阶段 A 行为。
+
+    Returns:
+        ContextBuild：可直接发给模型的 messages + 需要写回的摘要状态。
+    """
+    if not enabled:
+        return ContextBuild([SystemMessage(content=system_prompt), *messages], summary, 0, False)
+
+    keep_from = max(plan_window(messages, history_budget), summary_upto)
+    older = messages[summary_upto:keep_from]
+
+    summarized = False
+    if older:
+        if llm is not None:
+            summary = await summarize_history(
+                llm, older, previous_summary=summary, max_tokens=summary_budget
+            )
+        else:
+            tail = fallback_summary(older)
+            summary = f"{summary}\n{tail}".strip() if summary else tail
+        summary_upto = keep_from
+        summarized = True
+
+    prompt_messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
+    if summary:
+        prompt_messages.append(
+            SystemMessage(content=f"会话早期摘要（压缩自前 {summary_upto} 条消息）：\n{summary}")
+        )
+    prompt_messages.extend(messages[keep_from:])
+    return ContextBuild(prompt_messages, summary, summary_upto, summarized)

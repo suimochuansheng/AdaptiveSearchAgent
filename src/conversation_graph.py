@@ -20,13 +20,13 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from config import settings
-from src.context_manager import compress_tool_output
+from src.context_manager import build_context, compress_tool_output
 from src.tools.calculator import calculate_math
 from src.tools.rag import search_knowledge
 from src.tools.search import search_tavily
@@ -136,6 +136,19 @@ deep_research(query): 对复杂问题做多角度深度调研，生成带来源�
 """
 
 
+class ConversationState(MessagesState):
+    """会话状态 = 消息列表 + 历史压缩账本。
+
+    `context_summary` / `summary_upto` 是视图级压缩的"账本"：
+    - 压缩只影响发给模型的内容，全量 messages 永远留在 checkpoint 里；
+    - summary_upto 记录摘要覆盖到第几条消息，避免同一段历史被反复摘要。
+    两个字段都有默认值，旧会话（阶段 A 创建的 checkpoint）缺字段也能继续跑。
+    """
+
+    context_summary: str
+    summary_upto: int
+
+
 def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
     """构建会话式 Agent 主循环（agent ⇄ tools 循环 + 条件边终止）。
 
@@ -151,13 +164,27 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
         num_ctx=settings.ollama_num_ctx,
     ).bind_tools(TOOLS)
 
-    async def agent_node(state: MessagesState) -> dict:
-        # 每轮在消息头部注入 SystemMessage（保持无状态、可缓存前缀）
-        full_messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(state["messages"])
-        response = await model.ainvoke(full_messages)
-        return {"messages": [response]}
+    async def agent_node(state: ConversationState) -> dict:
+        # 每轮重新注入稳定区（system），旧轮次压成摘要，最近轮次保留原文
+        built = await build_context(
+            llm=model,
+            messages=list(state["messages"]),
+            system_prompt=SYSTEM_PROMPT,
+            summary=state.get("context_summary") or "",
+            summary_upto=state.get("summary_upto") or 0,
+            history_budget=settings.context_history_budget,
+            summary_budget=settings.context_summary_budget,
+            enabled=settings.context_management_enabled,
+        )
+        response = await model.ainvoke(built.messages)
 
-    graph = StateGraph(MessagesState)
+        update: dict = {"messages": [response]}
+        if built.summarized or built.summary_upto != (state.get("summary_upto") or 0):
+            update["context_summary"] = built.summary
+            update["summary_upto"] = built.summary_upto
+        return update
+
+    graph = StateGraph(ConversationState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", ToolNode(TOOLS))
 
