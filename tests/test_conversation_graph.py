@@ -1,13 +1,14 @@
 """会话式 Agent 图结构与 deep_research 工具行为测试（阶段 A 修复）。
 
 - 工具版图必须跳过 hitl_confirm（interrupt 不能嵌套在工具调用内），旧入口必须保留；
-- deep_research 的并发保护、异常回灌、报告截断、独立 thread_id / 无 checkpointer。
+- deep_research 的并发保护、异常回灌、报告压缩（保末段结论）、独立 thread_id / 无 checkpointer。
 都不需要真实 LLM：deep_research 内部调用的旧图用假图替换。
 """
 
 from typing import Any
 
 from src import conversation_graph as cg
+from src.context_manager import estimate_tokens
 from src.graph_factory import build_graph
 
 
@@ -72,17 +73,22 @@ async def test_deep_research_calls_tool_mode_graph_with_isolated_thread(monkeypa
     assert cg._deep_research_in_flight is False
 
 
-async def test_deep_research_truncates_long_report(monkeypatch) -> None:
-    """超长报告按字符上限截断，并标注已截断（段落重要度压缩是阶段 B）。"""
-    monkeypatch.setattr(
-        "src.graph_factory.build_graph", lambda **_: _FakeWorkflow(report="x" * 5000)
+async def test_deep_research_preserves_tail_conclusion(monkeypatch) -> None:
+    """超长报告按段落重要度压缩：末段结论与数字必须保住，且落在预算内（阶段 B1）。"""
+    filler = "检索到一段与问题关系不大的叙述，用于填充篇幅。" * 8
+    report = "\n\n".join(
+        [f"第 {i} 段：{filler}" for i in range(30)]
+        + ["结论：A 总成本 1200 万元，优于 B 的 1500 万元。"]
     )
+    monkeypatch.setattr("src.graph_factory.build_graph", lambda **_: _FakeWorkflow(report=report))
     monkeypatch.setattr(cg, "_deep_research_in_flight", False)
 
     result = await cg.deep_research("对比 A 和 B")
 
-    assert result.endswith("已截断）")
-    assert len(result) < 5000
+    assert "结论：A 总成本 1200 万元" in result
+    assert "1500" in result
+    assert "省略" in result
+    assert estimate_tokens(result) <= cg._DEEP_RESEARCH_TOKEN_BUDGET + 120
 
 
 async def test_deep_research_turns_exception_into_tool_text(monkeypatch) -> None:
@@ -109,3 +115,30 @@ async def test_deep_research_empty_report_falls_back(monkeypatch) -> None:
     result = await cg.deep_research("对比 A 和 B")
 
     assert "未能生成报告" in result
+
+
+def test_build_graph_pins_num_ctx(monkeypatch) -> None:
+    """窗口必须显式钉住：不设时由 Ollama 默认值决定，预算分层就失去锚点。"""
+    from config import settings
+
+    captured: dict[str, Any] = {}
+
+    class _DummyModel:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        def bind_tools(self, tools: Any) -> "_DummyModel":
+            captured["tools"] = [t.__name__ for t in tools]
+            return self
+
+        async def ainvoke(self, messages: Any) -> Any:
+            from langchain_core.messages import AIMessage
+
+            return AIMessage("ok")
+
+    monkeypatch.setattr(cg, "ChatOllama", _DummyModel)
+
+    cg.build_conversation_graph()
+
+    assert captured["num_ctx"] == settings.ollama_num_ctx >= 8192
+    assert captured["tools"] == ["search_knowledge", "search_tavily", "calculator", "deep_research"]

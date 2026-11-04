@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # Ollama 本地服务地址
     ollama_base_url: str = ""
 
+    # 会话式 Agent 的上下文窗口（tokens）。
+    # 不显式设置时窗口由 Ollama 的模型默认值决定，阶段 B 的预算分层就失去锚点；
+    # 这里固定 8192（3080 10G 上 qwen 7B INT4 + KV cache 可承载）。
+    ollama_num_ctx: int = 8192
+
     # OpenAI 兼容 API 地址（备援使用）
     openai_base_url: str = ""
 

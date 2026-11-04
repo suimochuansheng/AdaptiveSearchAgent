@@ -26,6 +26,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from config import settings
+from src.context_manager import compress_tool_output
 from src.tools.calculator import calculate_math
 from src.tools.rag import search_knowledge
 from src.tools.search import search_tavily
@@ -38,8 +39,8 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
-# deep_research 返回报告的最大字符数（上下文管理的最小截断，段落重要度压缩在阶段 B 落地）
-_DEEP_RESEARCH_REPORT_CAP = 4000
+# deep_research 回灌报告的 token 预算（阶段 B1：段落重要度压缩替代从头硬截断）
+_DEEP_RESEARCH_TOKEN_BUDGET = 2000
 
 
 async def calculator(expression: str) -> str:
@@ -111,9 +112,8 @@ async def _run_deep_research(query: str) -> str:
     report = final_state.get("final_report", "")
     if not report:
         return "深度调研未能生成报告，请换一种问法或拆成更小的问题。"
-    if len(report) > _DEEP_RESEARCH_REPORT_CAP:
-        report = report[:_DEEP_RESEARCH_REPORT_CAP] + "\n…（报告过长已截断）"
-    return report
+    # 阶段 B1：按段落重要度压缩（末段/数字/结论优先），不再从头硬截断
+    return compress_tool_output(report, _DEEP_RESEARCH_TOKEN_BUDGET)
 
 
 # ── 工具列表：模型每轮只能从这 4 个工具里选 ──────────────────────────────
@@ -147,6 +147,8 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
         model=settings.ollama_model_name,
         base_url=settings.ollama_base_url,
         temperature=0,
+        # 显式钉住窗口：不设时由 Ollama 模型默认值决定，阶段 B 的预算分层就没有锚点
+        num_ctx=settings.ollama_num_ctx,
     ).bind_tools(TOOLS)
 
     async def agent_node(state: MessagesState) -> dict:
