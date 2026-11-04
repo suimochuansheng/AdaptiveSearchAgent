@@ -620,7 +620,12 @@ async def chat_conversation(request: Request, body: ConversationRequest):
     # 会话状态校验（与 /chat/stream 同款逻辑的简化版）
     status = await get_task_state(thread_id)
     if status == "running":
-        raise HTTPException(429, "该会话正在执行中，请稍后再试")
+        # 僵尸 running 自愈：进程被杀/客户端断连后状态没清，但 Redis 锁已随 finally 释放
+        if not await redis_client.exists(f"agent_lock:{thread_id}"):
+            logger.warning("检测到僵尸 running 状态(thread_id=%s)，自动清理", thread_id)
+            await set_task_state(thread_id, "idle")
+        else:
+            raise HTTPException(429, "该会话正在执行中，请稍后再试")
 
     lock = redis_client.lock(f"agent_lock:{thread_id}", timeout=600)
     acquired = await lock.acquire(blocking=False)
@@ -632,33 +637,31 @@ async def chat_conversation(request: Request, body: ConversationRequest):
             raise HTTPException(429, "该会话正忙，请稍后再试")
 
     async def event_generator():
-        final_state = None
+        from src.conversation_stream import ConversationStreamError, stream_conversation
+
         try:
             await set_task_state(thread_id, "running")
             graph = await get_conversation_graph()
             config = {"configurable": {"thread_id": thread_id}}
 
-            # stream_mode="values"：每个 superstep 吐一次全量状态
-            async for event in graph.astream(
+            # 五类事件：token（增量文本）/ tool_call / ping（心跳）/ final / error
+            async for frame in stream_conversation(
+                graph,
                 {"messages": [HumanMessage(content=body.message)]},
-                config=config,
-                stream_mode="values",
+                config,
+                is_disconnected=request.is_disconnected,
             ):
-                if await request.is_disconnected():
-                    break
-                final_state = event
-
-            # 循环结束条件：最后一条 AI 消息不含 tool_calls
-            answer = ""
-            if final_state:
-                messages = final_state.get("messages", [])
-                if messages:
-                    answer = str(messages[-1].content)
-            yield f"data: {json.dumps({'type': 'final', 'content': answer})}\n\n"
+                yield frame
             await set_task_state(thread_id, "completed")
 
+        except ConversationStreamError:
+            # error 事件已由 stream_conversation 推送，这里只收尾状态机
+            logger.exception("会话式 Agent 执行错误")
+            await set_task_state(thread_id, "failed")
         except GeneratorExit:
+            # 客户端断连：把状态放回 idle，否则下一次请求会被 429 永久挡住
             logger.info("SSE 连接被客户端关闭 (GeneratorExit), thread_id=%s", thread_id)
+            await set_task_state(thread_id, "idle")
             return
         except Exception as e:
             logger.exception("会话式 Agent 执行错误")
@@ -834,9 +837,7 @@ async def get_task_result(thread_id: str):
         return JSONResponse(
             status_code=202,
             content={
-                "message": (
-                    "Task is still processing, " f"please check /api/task/{thread_id}/status"
-                ),
+                "message": (f"Task is still processing, please check /api/task/{thread_id}/status"),
             },
         )
 

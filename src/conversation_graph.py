@@ -47,6 +47,13 @@ async def calculator(expression: str) -> str:
     return await calculate_math(expression)
 
 
+# deep_research 同一时刻只允许一个在跑。
+# ToolNode 会并发执行同一轮的多个 tool_call：两个调研同时进入会撞 Semaphore(2) 的 LLM
+# 并发额度与 Tavily 限速，外层会话锁只管会话、不会拦第二次调用。
+# 这里用模块级布尔而不是 Semaphore：检查与置位之间没有 await，单线程 asyncio 下天然原子。
+_deep_research_in_flight = False
+
+
 async def deep_research(query: str) -> str:
     """深度调研：对复杂问题执行「规划→并行搜索→评估→重试→生成报告」的完整闭环。
 
@@ -54,6 +61,22 @@ async def deep_research(query: str) -> str:
     内部运行旧版 workflow 主图（include_hitl=False 跳过人工确认——工具调用内
     无法挂起等人工，HITL 职责由外层会话循环承担）。
     """
+    global _deep_research_in_flight
+    if _deep_research_in_flight:
+        return "已有另一项深度调研正在进行，请先基于它的结果回答；需要补充请把问题拆得更具体。"
+
+    _deep_research_in_flight = True
+    try:
+        return await _run_deep_research(query)
+    except Exception as exc:  # noqa: BLE001 - 工具异常回灌给模型，不让整个会话挂掉
+        logger.exception("deep_research 执行失败")
+        return f"深度调研执行失败：{exc}。可以换一种问法，或拆成更具体的小问题再试。"
+    finally:
+        _deep_research_in_flight = False
+
+
+async def _run_deep_research(query: str) -> str:
+    """执行一次调研闭环并把报告压到预算内（并发与异常处理在调用方）。"""
     from src.graph_factory import build_graph
 
     # 工具内使用独立 thread_id，不污染外层会话的 checkpoint
