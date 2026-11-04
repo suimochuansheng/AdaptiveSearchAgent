@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk
@@ -114,6 +115,25 @@ async def _next_event(
         return None
 
 
+def _frame_or_ping(
+    frame: str | None,
+    *,
+    last_emit: float,
+    heartbeat_seconds: float,
+    clock: Callable[[], float],
+) -> tuple[str | None, float]:
+    """有帧就发帧；没帧但已静默超时就补心跳。
+
+    返回 (要发送的帧或 None, 新的"上次发送时间")。被过滤的事件（如 deep_research
+    子图的 token）不产生帧，因此只能靠这里的静默计时兜住。
+    """
+    if frame:
+        return frame, clock()
+    if clock() - last_emit >= heartbeat_seconds:
+        return _sse({"type": "ping"}), clock()
+    return None, last_emit
+
+
 async def _stop_producer(producer: asyncio.Task[None]) -> None:
     """客户端断连/异常时让后台跑图任务退出，避免图继续跑却没人收结果。"""
     if producer.done():
@@ -130,6 +150,7 @@ async def stream_conversation(
     *,
     heartbeat_seconds: float = 10.0,
     is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> AsyncIterator[str]:
     """把一次图执行编排成 SSE 事件流。
 
@@ -139,6 +160,7 @@ async def stream_conversation(
         config: LangGraph 配置（thread_id 等）。
         heartbeat_seconds: 静默多久发一次 ping。
         is_disconnected: 客户端断连探测（传入 `request.is_disconnected`）。
+        clock: 单调时钟（测试注入假时钟，避免用 sleep 制造时序）。
 
     Yields:
         SSE 帧字符串，形如 `data: {"type": "token", "content": "…"}\n\n`。
@@ -162,12 +184,17 @@ async def stream_conversation(
             await queue.put((_FAILED, exc))
 
     producer = asyncio.create_task(_produce())
+    # "静默"的判据是"距上一帧多久"，不是"队列空不空"：
+    # deep_research 子图的 token 会源源不断进队列，但被节点过滤掉、不产生帧，
+    # 只按队列判空会导致子图连续出字时客户端全程无声（实测 272s 无 ping）。
+    last_emit = clock()
     try:
         while True:
             item = await _next_event(queue, heartbeat_seconds)
             if item is None:
-                # 工具执行期间没有新事件 → 发心跳，避免客户端/代理判定连接已死
+                # 队列真空闲 → 发心跳，避免客户端/代理判定连接已死
                 yield _sse({"type": "ping"})
+                last_emit = clock()
                 continue
 
             kind, payload = item
@@ -179,7 +206,12 @@ async def stream_conversation(
             if is_disconnected is not None and await is_disconnected():
                 return
 
-            frame = _consume(kind, payload, snapshot, answer_parts)
+            frame, last_emit = _frame_or_ping(
+                _consume(kind, payload, snapshot, answer_parts),
+                last_emit=last_emit,
+                heartbeat_seconds=heartbeat_seconds,
+                clock=clock,
+            )
             if frame:
                 yield frame
     finally:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -58,7 +58,8 @@ def save_offload(thread_id: str, tool_name: str, content: str) -> tuple[str, Pat
     """
     safe_thread = _safe_name(thread_id)
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
-    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    # 本地时间戳：验收时按时间对日志，UTC 会差 8 小时
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     directory = _offload_root() / safe_thread
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{_safe_name(tool_name)}-{stamp}-{digest}.md"
@@ -131,7 +132,8 @@ async def read_offload(pointer: str, keyword: str = "") -> str:
     """读取之前被卸载的完整工具输出（可按关键词只取相关段落）。
 
     Args:
-        pointer: 卸载时回灌的指针，形如 data/offload/<thread>/<tool>-<hash>.md。
+        pointer: 卸载时回灌的指针，形如 `<thread>/<tool>-<时间戳>-<hash>.md`
+            （相对 data/offload 的路径，不含 `data/offload/` 前缀）。
         keyword: 只返回包含该关键词的段落；留空则返回压缩后的全文。
 
     Returns:

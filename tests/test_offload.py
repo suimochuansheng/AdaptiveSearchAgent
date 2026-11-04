@@ -81,8 +81,13 @@ def test_small_output_is_untouched() -> None:
     assert "[已卸载]" not in str(shrunk.content)
 
 
-def test_medium_output_is_compressed_without_offload(_temp_root: Path) -> None:
-    # 约 2000 tokens：超过单条预算 1200，但没到落盘阈值 3000
+def test_raised_threshold_keeps_medium_output_in_prompt_only(
+    _temp_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """把阈值调大 = 只要压缩、不落盘（"只对超大结果落盘"模式）。"""
+    from config import settings
+
+    monkeypatch.setattr(settings, "offload_token_threshold", 3000)
     raw = _paragraphs(10, chars=200)
     assert 1200 < estimate_tokens(raw) <= 3000
 
@@ -91,6 +96,21 @@ def test_medium_output_is_compressed_without_offload(_temp_root: Path) -> None:
     assert estimate_tokens(str(shrunk.content)) <= 1200 + 200
     assert "[已卸载]" not in str(shrunk.content)
     assert list(_temp_root.iterdir()) == []  # 没有落盘
+
+
+async def test_default_threshold_offloads_any_lossy_compression(_temp_root: Path) -> None:
+    """默认阈值 = prompt 预算：只要发生有损压缩，就把原件留在磁盘上。"""
+    raw = _paragraphs(8, chars=220)  # 约 1760 tokens，刚过 1200
+    assert 1200 < estimate_tokens(raw) < 3000
+
+    shrunk = off.shrink_tool_message(_message(raw), thread_id="t")
+
+    assert "[已卸载]" in str(shrunk.content)
+    files = list(_temp_root.rglob("*.md"))
+    assert len(files) == 1
+    assert files[0].read_text(encoding="utf-8") == raw
+    # 文件名用本地时间戳（不校验数值，只校验格式段存在）
+    assert len(files[0].stem.split("-")) >= 3
 
 
 async def test_large_output_is_offloaded_with_pointer(_temp_root: Path) -> None:

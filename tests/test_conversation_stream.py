@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import itertools
 import json
 from typing import Any
 
@@ -177,3 +178,26 @@ async def test_disconnect_stops_before_final() -> None:
     ]
 
     assert frames == []
+
+
+async def test_ping_while_only_filtered_subgraph_chunks_arrive() -> None:
+    """回归：deep_research 子图连续出字期间（事件非空但被过滤）也必须按静默时长发 ping。
+
+    这是验收里实测到的 bug：只看"队列是否为空"会把被过滤的事件当成活跃，
+    子图连续输出多久，客户端就静默多久（实测 272s 无 ping）。
+    用假时钟保证确定性，不依赖 sleep。
+    """
+    ticks = itertools.count()
+
+    def _clock() -> float:
+        return float(next(ticks))
+
+    graph = _FakeGraph([_chunk("子图内部输出", node="writer") for _ in range(8)])
+
+    events = await _collect(graph, heartbeat_seconds=2.0, clock=_clock)
+
+    pings = [e for e in events if e["type"] == "ping"]
+    assert len(pings) >= 2, f"被过滤的空转没有补心跳：{events}"
+    # 全程没有 agent chunk → 不应出现 token，但 final 必须在
+    assert all(e["type"] != "token" for e in events)
+    assert events[-1]["type"] == "final"

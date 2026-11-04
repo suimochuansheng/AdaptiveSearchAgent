@@ -48,8 +48,10 @@ class Settings(BaseSettings):
     context_summary_budget: int = 800
     # 单条工具消息进 prompt 的预算（超出走段落重要度压缩）
     tool_output_token_budget: int = 1200
-    # 工具输出超过该 token 数就落盘，prompt 只留压缩版 + 指针（Offload）
-    offload_token_threshold: int = 3000
+    # 工具输出超过该 token 数就落盘，prompt 只留压缩版 + 指针（Offload）。
+    # 默认等于 prompt 预算：凡是"压缩"就是有损，有损就把原件留在磁盘上，
+    # 模型需要细节时还能按指针回读；调大它则退化为"只对超大结果落盘"。
+    offload_token_threshold: int = 1200
     offload_enabled: bool = True
     # 回读卸载文件时的预算：要比 prompt 里的压缩版更大，否则"回读"等于又压一遍
     offload_read_token_budget: int = 3000
