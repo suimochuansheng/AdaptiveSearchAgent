@@ -1,6 +1,7 @@
 """RAG 检索工具 — 通过 HTTP 调用 rag-ingest-gateway 子服务进行语义检索。"""
 
 import logging
+import time
 import uuid
 
 import httpx
@@ -8,6 +9,36 @@ import httpx
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+# ── 熔断器（阶段 C 运维补丁）────────────────────────────────────────────
+# RAG 子服务没起时，每个搜索 worker 都会等一次连接/超时失败再重试，
+# 一次深调研能拖到 10 分钟。连接级失败（连不上/超时）后冷却一段时间，
+# 期间直接返回空字符串——search_worker 会走 Tavily 兜底，不必反复撞墙。
+_clock = time.monotonic
+_unavailable_until: float = 0.0
+
+
+def _now() -> float:
+    return _clock()
+
+
+def _rag_available() -> bool:
+    """熔断期是否已过。"""
+    return _now() >= _unavailable_until
+
+
+def _mark_unavailable() -> None:
+    global _unavailable_until
+    _unavailable_until = _now() + settings.RAG_COOLDOWN_SECONDS
+    logger.warning(
+        "RAG 子服务不可用，%.0fs 内跳过检索（走 Tavily 兜底）",
+        settings.RAG_COOLDOWN_SECONDS,
+    )
+
+
+def _reset_breaker() -> None:
+    global _unavailable_until
+    _unavailable_until = 0.0
 
 
 async def search_knowledge(
@@ -32,6 +63,11 @@ async def search_knowledge(
         子服务返回的 result 字段；失败时降级返回空字符串。
     """
     request_id = str(uuid.uuid4())
+
+    if not _rag_available():
+        logger.debug("RAG 熔断中，跳过检索 (query=%r)", query)
+        return ""
+
     url = f"{settings.INGEST_SERVICE_URL}/api/v1/search"
 
     try:
@@ -64,10 +100,12 @@ async def search_knowledge(
                 query,
                 len(result),
             )
+            _reset_breaker()
             return result
 
     except httpx.TimeoutException:
         logger.warning("RAG 子服务超时 (request_id=%s)", request_id)
+        _mark_unavailable()
     except httpx.HTTPStatusError as e:
         logger.warning(
             "RAG 子服务返回错误 (request_id=%s, status=%d): %s",
@@ -77,5 +115,6 @@ async def search_knowledge(
         )
     except httpx.RequestError as e:
         logger.warning("RAG 子服务连接失败 (request_id=%s): %s", request_id, e)
+        _mark_unavailable()
 
     return ""

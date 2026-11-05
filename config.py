@@ -140,6 +140,8 @@ class Settings(BaseSettings):
     ENABLE_ASYNC_TASK: bool = False
     # 异步任务结果在 Redis 的存活时间（秒），默认 7 天
     ASYNC_TASK_RESULT_TTL: int = 604800
+    # RAG 子服务熔断冷却时间（秒）：连接级失败后这段时间内直接跳过检索
+    RAG_COOLDOWN_SECONDS: int = 60
 
     # 异步任务触发阈值（秒），超过此阈值的请求将转换为后台任务
     ASYNC_TASK_THRESHOLD_SECONDS: int = 120
