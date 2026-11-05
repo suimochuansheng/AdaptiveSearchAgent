@@ -138,6 +138,8 @@ class Settings(BaseSettings):
 
     # 异步任务：超时请求转为后台异步任务处理
     ENABLE_ASYNC_TASK: bool = False
+    # 异步任务结果在 Redis 的存活时间（秒），默认 7 天
+    ASYNC_TASK_RESULT_TTL: int = 604800
 
     # 异步任务触发阈值（秒），超过此阈值的请求将转换为后台任务
     ASYNC_TASK_THRESHOLD_SECONDS: int = 120

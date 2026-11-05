@@ -98,6 +98,14 @@ class ConversationRequest(BaseModel):
     message: str  # 本轮用户消息
 
 
+class AsyncConversationRequest(BaseModel):
+    """异步长任务（阶段 C1）请求体。"""
+
+    thread_id: str  # 会话唯一标识（结果写回同一会话存档）
+    message: str  # 本轮用户消息
+    user_id: str | None = None  # 缺省时退回 thread_id，日志里会标 identity=thread_fallback
+
+
 # ---------- PostgreSQL 任务状态表管理 ----------
 async def ensure_task_states_table():
     """确保 task_states 表存在，用于记录每个 thread_id 的执行状态"""
@@ -154,6 +162,10 @@ async def lifespan(app: FastAPI):
     # 1. 初始化数据库连接和任务表
     await init_checkpointer()
     await ensure_task_states_table()
+    # 异步任务表（阶段 C1）：与 task_states 分开，旧表一行不动
+    from src.async_tasks_store import ensure_async_tasks_table
+
+    await ensure_async_tasks_table()
 
     # 2. 启动后台清理任务
     async def clean_interrupted_tasks():
@@ -672,6 +684,119 @@ async def chat_conversation(request: Request, body: ConversationRequest):
                 await lock.release()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ===== 异步长任务端点（阶段 C1，ENABLE_ASYNC_TASK 控制启用） =====
+
+
+def _task_status_payload(task: dict) -> dict:
+    """把 async_tasks 行转成接口返回结构（内部字段不外泄）。"""
+    updated_at = task.get("updated_at")
+    return {
+        "task_id": task["task_id"],
+        "thread_id": task["thread_id"],
+        "state": task["state"],
+        "progress": task.get("progress", 0),
+        "error": task.get("error"),
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+
+
+@app.post("/tasks/conversation", status_code=202)
+async def submit_conversation_task(body: AsyncConversationRequest):
+    """提交一个异步会话任务，立即返回 task_id（不阻塞连接）。
+
+    典型场景：深度调研要跑几分钟，用户不想一直挂着连接。
+    """
+    if not settings.ENABLE_ASYNC_TASK:
+        raise HTTPException(403, "异步任务未启用（ENABLE_ASYNC_TASK=False）")
+
+    from src.async_tasks_store import create_task, set_state
+    from src.tasks_conversation import enqueue_conversation_task
+
+    user_id = body.user_id or body.thread_id
+    if not body.user_id:
+        logger.info("异步任务未提供 user_id，退回 thread_id", extra={"thread_id": body.thread_id})
+
+    task_id = await create_task(
+        thread_id=body.thread_id,
+        user_id=user_id,
+        message=body.message,
+    )
+    try:
+        enqueue_conversation_task(task_id)
+    except Exception as exc:  # broker 不可用时给明确指引，而不是 500 空手
+        await set_state(task_id, "failed", error=f"enqueue failed: {exc}")
+        raise HTTPException(
+            503, f"任务入队失败：{exc}（请确认 Redis 与 Celery Worker 可用）"
+        ) from exc
+
+    return {
+        "task_id": task_id,
+        "state": "queued",
+        "status_url": f"/tasks/{task_id}/status",
+        "result_url": f"/tasks/{task_id}/result",
+    }
+
+
+@app.get("/tasks/{task_id}/status")
+async def get_async_task_status(task_id: str):
+    """查询异步任务状态与进度（前端轮询）。"""
+    from src.async_tasks_store import get_task
+
+    task = await get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    return _task_status_payload(task)
+
+
+@app.get("/tasks/{task_id}/result")
+async def get_async_task_result(task_id: str):
+    """取异步任务结果：完成返回答案；未完成 202；失败返回错误原因。"""
+    from src.async_tasks_store import get_task
+    from src.tasks_conversation import read_result
+
+    task = await get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+
+    if task["state"] == "completed":
+        raw = await read_result(task_id)
+        if raw is None:
+            raise HTTPException(410, "任务结果已过期（默认保留 7 天），请重新提交")
+        data = json.loads(raw)
+        return {"task_id": task_id, **data, "state": "completed"}
+
+    if task["state"] == "failed":
+        return JSONResponse(
+            status_code=200,
+            content={"task_id": task_id, "state": "failed", "error": task.get("error")},
+        )
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            **_task_status_payload(task),
+            "message": f"任务尚未完成，请轮询 /tasks/{task_id}/status",
+        },
+    )
+
+
+@app.post("/tasks/{task_id}/cancel")
+async def cancel_async_task(task_id: str):
+    """请求取消任务。真正的停止发生在执行器两个 superstep 之间（不硬杀进程）。"""
+    from src.async_tasks_store import get_task, request_cancel
+
+    task = await get_task(task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    accepted = await request_cancel(task_id)
+    refreshed = await get_task(task_id) or task
+    return {
+        "task_id": task_id,
+        "cancel_requested": accepted,
+        "state": refreshed["state"],
+    }
 
 
 # ===== ReAct 工具调用演示端点（ENABLE_DYNAMIC_TOOLS 控制启用） =====
