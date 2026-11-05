@@ -151,4 +151,8 @@ async def read_offload(pointer: str, keyword: str = "") -> str:
     body = (
         _select_by_keyword(text, keyword, budget) if keyword else compress_tool_output(text, budget)
     )
-    return f"（{pointer} 回读，原文约 {estimate_tokens(text)} tokens）\n\n{body}"
+    return (
+        f"（{pointer} 回读，原文约 {estimate_tokens(text)} tokens）\n"
+        "如果以上内容已经足以回答用户的问题，请直接作答，不要重复调用 deep_research。\n\n"
+        f"{body}"
+    )

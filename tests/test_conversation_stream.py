@@ -7,12 +7,17 @@
 import asyncio
 import itertools
 import json
+import time
 from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
-from src.conversation_stream import ConversationStreamError, stream_conversation
+from src.conversation_stream import (
+    ConversationStreamError,
+    _remaining_until_ping,
+    stream_conversation,
+)
 
 
 class _FakeGraph:
@@ -24,11 +29,19 @@ class _FakeGraph:
         *,
         delay: float = 0.0,
         error: Exception | None = None,
+        prior_messages: list[Any] | None = None,
     ) -> None:
         self._events = events
         self._delay = delay
         self._error = error
+        self._prior = prior_messages or []
         self.stream_mode: Any = None
+
+    async def aget_state(self, config: Any = None) -> Any:
+        """模拟 checkpointer：暴露进入本轮前的历史消息条数。"""
+        from types import SimpleNamespace
+
+        return SimpleNamespace(values={"messages": list(self._prior)})
 
     async def astream(  # type: ignore[no-untyped-def]
         self, inputs: dict[str, Any], config: dict[str, Any] | None = None, stream_mode: Any = None
@@ -201,3 +214,82 @@ async def test_ping_while_only_filtered_subgraph_chunks_arrive() -> None:
     # 全程没有 agent chunk → 不应出现 token，但 final 必须在
     assert all(e["type"] != "token" for e in events)
     assert events[-1]["type"] == "final"
+
+
+def test_remaining_until_ping_reflects_elapsed() -> None:
+    """等待时间用"剩余"，不是固定 heartbeat（回归：9.9s 到达的事件会把 ping 推到 20s）。"""
+    clock = lambda: 9.9  # noqa: E731
+
+    assert _remaining_until_ping(0.0, 10.0, clock) == pytest.approx(0.1)
+    assert _remaining_until_ping(0.0, 10.0, lambda: 25.0) < 0
+
+
+async def test_ping_gap_stays_within_heartbeat_when_filtered_events_are_just_under_it() -> None:
+    """被过滤事件每 0.18s 来一条、心跳 0.2s：ping 间隔必须仍然 ≈0.2s，而不是 ~0.4s。"""
+    heartbeat = 0.2
+    graph = _FakeGraph(
+        [_chunk(f"子图 {i}", node="writer") for i in range(8)],
+        delay=heartbeat * 0.9,
+    )
+
+    timestamps: list[float] = []
+    kinds: list[str] = []
+    async for frame in stream_conversation(
+        graph, {"messages": []}, {}, heartbeat_seconds=heartbeat
+    ):
+        event = _parse(frame)
+        kinds.append(event["type"])
+        timestamps.append(time.monotonic())
+
+    ping_times = [ts for ts, kind in zip(timestamps, kinds, strict=True) if kind == "ping"]
+    assert ping_times, f"整段流没有任何 ping：{kinds}"
+    gaps = [b - a for a, b in zip(ping_times, ping_times[1:], strict=False)]
+    assert max(gaps, default=0) <= heartbeat * 1.6, f"ping 间隔超标：{gaps}"
+
+
+async def test_historical_tool_calls_are_not_replayed() -> None:
+    """checkpoint 回放的历史工具调用不能被当成本轮事件（前端会看到每轮开头都有假调用）。"""
+    history = [
+        HumanMessage("第一轮：1+1"),
+        AIMessage(
+            "",
+            tool_calls=[{"name": "calculator", "args": {"expression": "1+1"}, "id": "old-1"}],
+        ),
+        ToolMessage("2", tool_call_id="old-1"),
+        AIMessage("等于 2"),
+    ]
+    graph = _FakeGraph(
+        [("values", {"messages": [*history, HumanMessage("第二轮：谢谢")]})],
+        prior_messages=history,
+    )
+
+    events = await _collect(graph)
+
+    assert [e for e in events if e["type"] == "tool_call"] == []
+
+
+async def test_new_tool_calls_in_this_turn_are_still_reported() -> None:
+    """基线只跳过历史，本轮新发起的工具调用仍要上报。"""
+    history = [HumanMessage("第一轮"), AIMessage("好的")]
+    new_call = {"name": "deep_research", "args": {"query": "x"}, "id": "new-1"}
+    graph = _FakeGraph(
+        [
+            (
+                "values",
+                {
+                    "messages": [
+                        *history,
+                        HumanMessage("第二轮"),
+                        AIMessage("", tool_calls=[new_call]),
+                    ]
+                },
+            )
+        ],
+        prior_messages=history,
+    )
+
+    events = await _collect(graph)
+
+    calls = [e for e in events if e["type"] == "tool_call"]
+    assert len(calls) == 1
+    assert calls[0]["tools"][0]["name"] == "deep_research"

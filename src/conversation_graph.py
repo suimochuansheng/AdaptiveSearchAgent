@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import (
-    RunnableConfig,  # noqa: TC002 - LangGraph 运行期按签名注入 config
+    RunnableConfig,  # noqa: TCH002 - LangGraph 运行期按签名注入 config
 )
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -136,6 +136,7 @@ read_offload(pointer, keyword): 回读之前被卸载的完整工具输出（可
 - 纯数学计算 → 仅用 calculator
 - 需要多角度对比、综合调研的复杂问题 → 用 deep_research
 - 工具输出里有"[已卸载]"标记时，需要更多细节就用 read_offload 按 pointer 回读
+- 如果已有工具结果足以回答，直接作答；同一个问题不要重复调用 deep_research
 - 回答只基于工具返回的结果；工具没有的信息，明确说不知道，不要编造
 """
 

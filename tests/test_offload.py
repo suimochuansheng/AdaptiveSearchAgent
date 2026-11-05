@@ -132,6 +132,7 @@ async def test_large_output_is_offloaded_with_pointer(_temp_root: Path) -> None:
     rel_path = content.split("已存到 ")[1].split("。")[0]
     recalled = await off.read_offload(rel_path)
     assert estimate_tokens(recalled) > estimate_tokens(content)
+    assert "直接作答" in recalled  # 回读后要提示模型收尾，别再重复调研
 
 
 def test_offload_failure_degrades_to_compression(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -115,23 +115,46 @@ async def _next_event(
         return None
 
 
-def _frame_or_ping(
-    frame: str | None,
+def _remaining_until_ping(
+    last_emit: float, heartbeat_seconds: float, clock: Callable[[], float]
+) -> float:
+    """距下一次必须发心跳还剩多少秒（<=0 表示已经该发了）。
+
+    关键：等待时间必须用"剩余时间"，不能用固定 heartbeat——否则被过滤的事件
+    在 9.9s 到达时既不发 ping、又重新等满 10s，下一条就被推迟到接近 20s。
+    """
+    return heartbeat_seconds - (clock() - last_emit)
+
+
+async def _wait_for_event(
+    queue: asyncio.Queue[tuple[str, Any]],
     *,
     last_emit: float,
     heartbeat_seconds: float,
     clock: Callable[[], float],
-) -> tuple[str | None, float]:
-    """有帧就发帧；没帧但已静默超时就补心跳。
+) -> tuple[str, Any] | None:
+    """等到下一条事件；等满"剩余心跳时间"就返回 None（调用方发 ping）。
 
-    返回 (要发送的帧或 None, 新的"上次发送时间")。被过滤的事件（如 deep_research
-    子图的 token）不产生帧，因此只能靠这里的静默计时兜住。
+    已静默满一个周期时立即返回 None，不再排队等——否则一条 9.9s 到达的
+    被过滤事件会把下一条 ping 推迟到接近 20s。
     """
-    if frame:
-        return frame, clock()
-    if clock() - last_emit >= heartbeat_seconds:
-        return _sse({"type": "ping"}), clock()
-    return None, last_emit
+    remaining = _remaining_until_ping(last_emit, heartbeat_seconds, clock)
+    if remaining <= 0:
+        return None
+    return await _next_event(queue, remaining)
+
+
+async def _baseline_messages(graph: Any, config: dict[str, Any]) -> int:
+    """读取进入本次请求前 checkpoint 里已有的消息条数（无 checkpointer 时为 0）。"""
+    getter = getattr(graph, "aget_state", None)
+    if getter is None:
+        return 0
+    try:
+        snapshot = await getter(config)
+    except Exception:  # noqa: BLE001 - 读不到历史不影响本轮
+        return 0
+    values = getattr(snapshot, "values", None) or {}
+    return len(values.get("messages") or [])
 
 
 async def _stop_producer(producer: asyncio.Task[None]) -> None:
@@ -167,7 +190,9 @@ async def stream_conversation(
     """
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
     # 流式状态：图的最新全量快照、已检查过的消息条数、已推送的 token 片段
-    snapshot: dict[str, Any] = {"final": None, "seen": 0}
+    # seen 从"进入本次请求前的历史条数"起算：checkpoint 会把历史一起回放，
+    # 从 0 起算会把上一轮的工具调用当成这一轮的事件重发给前端。
+    snapshot: dict[str, Any] = {"final": None, "seen": await _baseline_messages(graph, config)}
     answer_parts: list[str] = []
 
     async def _produce() -> None:
@@ -190,9 +215,14 @@ async def stream_conversation(
     last_emit = clock()
     try:
         while True:
-            item = await _next_event(queue, heartbeat_seconds)
+            item = await _wait_for_event(
+                queue,
+                last_emit=last_emit,
+                heartbeat_seconds=heartbeat_seconds,
+                clock=clock,
+            )
             if item is None:
-                # 队列真空闲 → 发心跳，避免客户端/代理判定连接已死
+                # 静默满一个心跳周期（或被过滤的事件不算活跃）→ 补 ping
                 yield _sse({"type": "ping"})
                 last_emit = clock()
                 continue
@@ -206,14 +236,10 @@ async def stream_conversation(
             if is_disconnected is not None and await is_disconnected():
                 return
 
-            frame, last_emit = _frame_or_ping(
-                _consume(kind, payload, snapshot, answer_parts),
-                last_emit=last_emit,
-                heartbeat_seconds=heartbeat_seconds,
-                clock=clock,
-            )
+            frame = _consume(kind, payload, snapshot, answer_parts)
             if frame:
                 yield frame
+                last_emit = clock()
     finally:
         await _stop_producer(producer)
 
