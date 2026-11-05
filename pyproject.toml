@@ -81,7 +81,7 @@ quote-style = "double"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m \"not e2e\""
 markers = [
     "e2e: end-to-end tests that call real LLM or external services (not run in CI by default)",
 ]

@@ -8,18 +8,26 @@
 这些测试可通过两种模式运行：
   1. 手动模式（默认）：需要先启动后端 `poetry run uvicorn api_main:app --port 8000`
   2. 脚本模式：使用 httpx 自动请求真实后端
+
+注意：会真正跑完整 workflow 的 3 个用例标了 `e2e`，默认被 pyproject 的
+`addopts = -m "not e2e"` 排除——它们依赖本机 LLM，且客户端超时后旧端点
+`/chat/stream` 的 Redis 锁要等 600s 才释放，会连带后面的用例 429。
+需要跑它们时：pytest -m e2e tests/test_frontend/test_backend_api_contract.py
 """
 
 from __future__ import annotations
 
 import json
 import os
+from urllib.parse import urlparse
 
 import httpx
 import pytest
 
 # 后端地址，测试时可通过环境变量覆盖
 BACKEND_URL = os.getenv("TEST_BACKEND_URL", "http://localhost:8000")
+_BACKEND_HOST = urlparse(BACKEND_URL).hostname or "localhost"
+_BACKEND_PORT = urlparse(BACKEND_URL).port or 8000
 
 
 # =============================================================================
@@ -34,7 +42,7 @@ def _backend_reachable() -> bool:
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(2)
-        result = s.connect_ex(("localhost", 8000))
+        result = s.connect_ex((_BACKEND_HOST, _BACKEND_PORT))
         s.close()
         return result == 0
     except Exception:
@@ -123,6 +131,7 @@ class TestChatStreamValidation:
         assert resp.status_code == 422
 
     @requires_backend
+    @pytest.mark.e2e  # 会真的跑完整 workflow（依赖 LLM，慢），默认不跑
     @pytest.mark.asyncio
     async def test_空消息首次请求可接受(self) -> None:
         """首次请求 message="" 应被接受（后端用 user_input=None 处理）。"""
@@ -160,6 +169,7 @@ class TestSSEFormat:
     VALID_EVENT_TYPES = {"status", "final", "kpi", "interrupt", "error"}
 
     @requires_backend
+    @pytest.mark.e2e  # 会真的跑完整 workflow（依赖 LLM，慢），默认不跑
     @pytest.mark.asyncio
     async def test_sse事件以data开头(self) -> None:
         """发送一个简单请求，验证 SSE 流的每行格式。"""
@@ -222,6 +232,7 @@ class TestConcurrencyGuard:
     """验证后端的 429 并发保护机制。"""
 
     @requires_backend
+    @pytest.mark.e2e  # 会真的跑完整 workflow（依赖 LLM，慢），默认不跑
     @pytest.mark.asyncio
     async def test_同一thread连续请求_第二次应429(self) -> None:
         """对同一 thread_id 快速发送两次请求 → 第二次应返回 429。
