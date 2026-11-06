@@ -77,10 +77,25 @@ async def deep_research(query: str) -> str:
         _deep_research_in_flight = False
 
 
-async def _run_deep_research(query: str) -> str:
-    """执行一次调研闭环并把报告压到预算内（并发与异常处理在调用方）。"""
+def _build_research_graph():
+    """按配置返回调研用的图：真 workflow，或开发期假图。
+
+    两者接口一致（`ainvoke(state, config)` → `{"final_report": str}`），
+    所以外层会话循环感知不到差别——这正是"工具化"带来的可替换性。
+    """
+    if settings.DEEP_RESEARCH_BACKEND == "stub":
+        from src.tools.stub_research import build_stub_graph
+
+        logger.info("deep_research 使用 stub 假图（开发模式，不跑旧 workflow）")
+        return build_stub_graph()
+
     from src.graph_factory import build_graph
 
+    return build_graph(checkpointer=None, include_hitl=False)
+
+
+async def _run_deep_research(query: str) -> str:
+    """执行一次调研闭环（并发与异常处理在调用方）。"""
     # 工具内使用独立 thread_id，不污染外层会话的 checkpoint
     thread_id = f"deep-research-{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": thread_id, "llm_provider": "ollama"}}
@@ -106,8 +121,9 @@ async def _run_deep_research(query: str) -> str:
         "hitl_decision": "confirmed",
     }
 
-    # 工具版图：不接 checkpointer（无 interrupt、无需恢复），跳过 HITL 节点
-    graph = build_graph(checkpointer=None, include_hitl=False)
+    # 工具版图不接 checkpointer（无 interrupt、无需恢复），并跳过 HITL；
+    # stub 模式下换成假图，接口不变
+    graph = _build_research_graph()
     final_state = await graph.ainvoke(initial_state, config=config)
 
     report = final_state.get("final_report", "")

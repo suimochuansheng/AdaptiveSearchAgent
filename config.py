@@ -4,6 +4,7 @@
 """
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 
@@ -142,6 +143,11 @@ class Settings(BaseSettings):
     ASYNC_TASK_RESULT_TTL: int = 604800
     # RAG 子服务熔断冷却时间（秒）：连接级失败后这段时间内直接跳过检索
     RAG_COOLDOWN_SECONDS: int = 60
+    # deep_research 的执行后端：
+    #   workflow = 真跑旧 workflow 图（默认，行为与现在一致）
+    #   stub     = 假图（开发期用：秒回、不依赖 RAG/Ollama 子服务）
+    # 因为 deep_research 已经是普通工具，换后端不影响外层会话循环。
+    DEEP_RESEARCH_BACKEND: Literal["workflow", "stub"] = "workflow"
 
     # 异步任务触发阈值（秒），超过此阈值的请求将转换为后台任务
     ASYNC_TASK_THRESHOLD_SECONDS: int = 120
