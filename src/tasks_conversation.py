@@ -32,6 +32,8 @@ class TaskStore(Protocol):
 
     async def get(self, task_id: str) -> dict[str, Any] | None: ...
 
+    async def claim(self, task_id: str) -> bool: ...
+
     async def set_state(
         self,
         task_id: str,
@@ -93,9 +95,16 @@ async def run_conversation_task(
         return {"task_id": task_id, "state": "completed", "idempotent": True}
     if task["state"] == "cancelled":
         return {"task_id": task_id, "state": "cancelled"}
+    if task["state"] == "failed":
+        return {"task_id": task_id, "state": "failed", "error": task.get("error"), "skipped": True}
+
+    # 原子认领：两个 Worker 同时收到同一任务时，只有一个能把它从 queued 推进到 running
+    if not await store.claim(task_id):
+        current = await store.get(task_id) or {}
+        logger.info("任务已被其他 Worker 认领或已结束", extra={"task_id": task_id})
+        return {"task_id": task_id, "state": current.get("state", "unknown"), "skipped": True}
 
     message = (task.get("payload") or {}).get("message", "")
-    await store.set_state(task_id, "running", progress=_PROGRESS_START)
 
     # 排队期间就被取消的任务：连图都不要建，省一次模型调用
     if await store.is_cancel_requested(task_id):
@@ -159,6 +168,11 @@ class _DbTaskStore:
         from src.async_tasks_store import get_task
 
         return await get_task(task_id)
+
+    async def claim(self, task_id: str) -> bool:
+        from src.async_tasks_store import claim_task
+
+        return await claim_task(task_id)
 
     async def set_state(self, task_id: str, state: str, **kwargs: Any) -> None:
         from src.async_tasks_store import set_state

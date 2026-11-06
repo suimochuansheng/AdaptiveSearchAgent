@@ -17,10 +17,18 @@ from src.tasks_conversation import RESULT_KEY_TEMPLATE, run_conversation_task
 class _FakeStore:
     """内存版任务存储，接口与 async_tasks_store 对齐。"""
 
-    def __init__(self, task: dict[str, Any] | None) -> None:
+    def __init__(self, task: dict[str, Any] | None, *, claim_ok: bool = True) -> None:
         self.task = task
         self.states: list[tuple[str, int | None, str | None]] = []
         self.cancel = False
+        self.claim_ok = claim_ok
+        self.claim_calls = 0
+
+    async def claim(self, task_id: str) -> bool:
+        self.claim_calls += 1
+        if self.claim_ok and self.task is not None:
+            self.task["state"] = "running"
+        return self.claim_ok
 
     async def get(self, task_id: str) -> dict[str, Any] | None:
         return self.task
@@ -285,3 +293,37 @@ async def test_cancel_while_queued_skips_graph() -> None:
     assert outcome["state"] == "cancelled"
     assert built is False
     assert store.states[-1][0] == "cancelled"
+
+
+async def test_second_worker_cannot_claim_same_task() -> None:
+    """两个 Worker 同时拿到同一任务：认领失败的那个直接退出，不重复调模型。"""
+    store = _FakeStore(_task(state="queued"), claim_ok=False)
+    results = _FakeResultStore()
+    built = False
+
+    async def _factory() -> _FakeGraph:
+        nonlocal built
+        built = True
+        return _FakeGraph([])
+
+    outcome = await run_conversation_task(
+        "t-1", graph_factory=_factory, store=store, result_store=results
+    )
+
+    assert outcome["skipped"] is True
+    assert built is False
+    assert results.data == {}
+
+
+async def test_failed_task_is_not_rerun() -> None:
+    """已失败的任务是终态：Worker 重投时直接返回，不再重跑。"""
+    store = _FakeStore({**_task(state="failed"), "error": "RuntimeError: boom"})
+    results = _FakeResultStore()
+
+    outcome = await run_conversation_task(
+        "t-1", graph_factory=lambda: None, store=store, result_store=results
+    )
+
+    assert outcome["state"] == "failed"
+    assert outcome["skipped"] is True
+    assert store.claim_calls == 0

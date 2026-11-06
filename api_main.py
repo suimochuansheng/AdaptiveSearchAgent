@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 
 # 用于跟踪后台任务，以便在 shutdown 时优雅取消
 cleanup_task = None
+async_maintenance_task = None
 
 # ---------- Redis 客户端（用于分布式锁）----------
 redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -155,6 +156,36 @@ async def set_task_state(thread_id: str, state: str, interrupt_time=None):
         )
 
 
+# ---------- 后台维护：异步任务僵尸回收与清理（阶段 C2）----------
+async def maintain_async_tasks_loop():
+    """每 5 分钟回收一次僵尸异步任务，并清理过期终态行。
+
+    - running 超过 ASYNC_STALE_SECONDS 没更新 → 认为 Worker 没了：
+      重试次数未用尽就重新入队，用尽则置 failed；
+    - 终态任务行超过 ASYNC_PURGE_DAYS 天 → 删除（结果本身在 Redis 有 TTL）。
+    """
+    from src.async_tasks_store import fail_stale_exhausted, purge_finished, requeue_stale
+    from src.tasks_conversation import enqueue_conversation_task
+
+    while True:
+        await asyncio.sleep(300)
+        try:
+            stale = await requeue_stale(settings.ASYNC_STALE_SECONDS, settings.ASYNC_MAX_ATTEMPTS)
+            for task_id in stale:
+                enqueue_conversation_task(task_id)
+            failed = await fail_stale_exhausted(
+                settings.ASYNC_STALE_SECONDS, settings.ASYNC_MAX_ATTEMPTS
+            )
+            purged = await purge_finished(settings.ASYNC_PURGE_DAYS)
+            if stale or failed or purged:
+                logger.info(
+                    "异步任务维护完成",
+                    extra={"requeued": len(stale), "failed": failed, "purged": purged},
+                )
+        except Exception:  # noqa: BLE001 - 维护失败不能拖垮服务
+            logger.exception("异步任务维护失败")
+
+
 # ---------- 后台清理任务：清理超时中断的会话 ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -191,8 +222,9 @@ async def lifespan(app: FastAPI):
                     await lock.release()
                 logger.info(f"清理超时中断会话: {thread_id}")
 
-    global cleanup_task
+    global cleanup_task, async_maintenance_task
     cleanup_task = asyncio.create_task(clean_interrupted_tasks())
+    async_maintenance_task = asyncio.create_task(maintain_async_tasks_loop())
     logger.info("后台清理任务已启动")
     logger.info("FastAPI 启动完成")
 
@@ -206,6 +238,13 @@ async def lifespan(app: FastAPI):
             await cleanup_task
         except asyncio.CancelledError:
             logger.info("后台清理任务已取消")
+
+    if async_maintenance_task:
+        async_maintenance_task.cancel()
+        try:
+            await async_maintenance_task
+        except asyncio.CancelledError:
+            logger.info("异步任务维护已取消")
 
     # 2. 关闭数据库和 Redis 连接
     await close_checkpointer()

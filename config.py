@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     ENABLE_ASYNC_TASK: bool = False
     # 异步任务结果在 Redis 的存活时间（秒），默认 7 天
     ASYNC_TASK_RESULT_TTL: int = 604800
+    # 异步任务僵尸判定：running 超过这么久没更新就认为 Worker 没了（秒）
+    ASYNC_STALE_SECONDS: int = 1800
+    # 僵尸任务最多自动重跑几次（超过就置 failed，避免无限循环）
+    ASYNC_MAX_ATTEMPTS: int = 2
+    # 终态任务行保留天数（结果在 Redis 另有 TTL）
+    ASYNC_PURGE_DAYS: int = 7
     # RAG 子服务熔断冷却时间（秒）：连接级失败后这段时间内直接跳过检索
     RAG_COOLDOWN_SECONDS: int = 60
     # deep_research 的执行后端：
