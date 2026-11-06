@@ -84,3 +84,17 @@ async def test_stub_backend_resets_in_flight_flag(monkeypatch) -> None:
     await cg.deep_research("一次调研")
 
     assert cg._deep_research_in_flight is False
+
+
+def test_needle_report_is_long_and_hides_needle_in_middle() -> None:
+    """压测用长报告：足够长（会触发 offload），针眼在压缩必丢的中段。"""
+    from src.context_manager import compress_tool_output, estimate_tokens
+    from src.tools.stub_research import NEEDLE, stub_report
+
+    report = stub_report("请给我一份长报告，对比 A 和 B")
+
+    assert estimate_tokens(report) > 1200  # 会触发 Offload
+    assert NEEDLE in report
+
+    compressed = compress_tool_output(report, 1200)
+    assert NEEDLE not in compressed  # 压缩版确实丢了针眼 → 只能回读

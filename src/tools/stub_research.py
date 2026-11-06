@@ -35,8 +35,39 @@ _STUB_TEMPLATE = """{marker} 深度调研（开发期假数据，未调用旧 wo
 """
 
 
+# 压测"回读"用的针眼：正文中段的一条无数字、无结论词的唯一串，
+# 段落重要度压缩必然把它丢掉 → 模型只能靠 read_offload 才答得出
+NEEDLE: Final = "NEEDLE-7f3a9c"
+
+
+def _needle_report(query: str) -> str:
+    """构造一份超长假报告，针眼藏在中段（正常压缩会被丢掉）。"""
+    paragraphs = [f"{STUB_MARKER} 调研问题：{query}", "## 背景"]
+    for i in range(1, 61):
+        if i == 20:
+            # 针眼段刻意写得又长又没营养：打分时被压到最低，压缩一定丢掉它
+            paragraphs.append(
+                f"第 {i} 段：这一段的唯一作用是把内部标识 {NEEDLE} 淹没在冗长叙述里，"
+                + "补充说明。" * 40
+            )
+        elif i % 5 == 0:
+            paragraphs.append(
+                f"第 {i} 段：样本 A 的成本 {i * 100} 元，样本 B 的成本 {i * 120} 元。"
+            )
+        else:
+            paragraphs.append(f"第 {i} 段：关于对比维度的补充说明，" + "用于填充篇幅。" * 6)
+    paragraphs.append("## 结论")
+    paragraphs.append("综合成本与周期，样本 A 更优；若以稳定性优先，则选样本 B。")
+    return "\n\n".join(paragraphs)
+
+
 def stub_report(query: str) -> str:
-    """生成一份确定性的假报告（同样的 query 永远得到同样的文本）。"""
+    """生成一份确定性的假报告（同样的 query 永远得到同样的文本）。
+
+    查询里包含"长报告"时返回超长版本（约 2000+ tokens），用于压测压缩/Offload 链路。
+    """
+    if "长报告" in query:
+        return _needle_report(query)
     return _STUB_TEMPLATE.format(marker=STUB_MARKER, query=query)
 
 
