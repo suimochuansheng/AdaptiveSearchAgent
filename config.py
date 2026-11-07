@@ -156,6 +156,13 @@ class Settings(BaseSettings):
     #   stub     = 假图（开发期用：秒回、不依赖 RAG/Ollama 子服务）
     # 因为 deep_research 已经是普通工具，换后端不影响外层会话循环。
     DEEP_RESEARCH_BACKEND: Literal["workflow", "stub"] = "workflow"
+    # ── 阶段 C3：跨会话画像 ──
+    # 关掉后不读画像、不触发抽取，行为与阶段 B 完全一致
+    MEMORY_ENABLED: bool = False
+    # 画像注入稳定区的 token 预算
+    MEMORY_PROFILE_TOKEN_BUDGET: int = 200
+    # 每 N 轮触发一次异步抽取（写侧，C3b 接入）
+    MEMORY_EXTRACT_EVERY_TURNS: int = 10
 
     # 异步任务触发阈值（秒），超过此阈值的请求将转换为后台任务
     ASYNC_TASK_THRESHOLD_SECONDS: int = 120

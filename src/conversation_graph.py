@@ -168,6 +168,9 @@ class ConversationState(MessagesState):
 
     context_summary: str
     summary_upto: int
+    # 阶段 C3：身份与画像缓存（画像只读一次，之后每轮直接用缓存）
+    user_id: str
+    profile_context: str
 
 
 def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
@@ -187,10 +190,21 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     async def agent_node(state: ConversationState) -> dict:
         # 每轮重新注入稳定区（system），旧轮次压成摘要，最近轮次保留原文
+        # 画像属于稳定区：只在第一轮读一次 DB，之后用 state 里的缓存
+        profile_context = state.get("profile_context") or ""
+        if not profile_context and settings.MEMORY_ENABLED:
+            from src.memory.profile_context import load_profile_context
+
+            profile_context = await load_profile_context(state.get("user_id") or "")
+
+        system_prompt = SYSTEM_PROMPT
+        if profile_context:
+            system_prompt = f"{SYSTEM_PROMPT}\n\n{profile_context}"
+
         built = await build_context(
             llm=model,
             messages=list(state["messages"]),
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             summary=state.get("context_summary") or "",
             summary_upto=state.get("summary_upto") or 0,
             history_budget=settings.context_history_budget,
@@ -203,6 +217,8 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
         if built.summarized or built.summary_upto != (state.get("summary_upto") or 0):
             update["context_summary"] = built.summary
             update["summary_upto"] = built.summary_upto
+        if profile_context and profile_context != (state.get("profile_context") or ""):
+            update["profile_context"] = profile_context
         return update
 
     tool_node = ToolNode(TOOLS)

@@ -117,7 +117,7 @@ async def run_conversation_task(
         graph = await graph_factory()
         config = {"configurable": {"thread_id": task["thread_id"]}}
         async for event in graph.astream(
-            _initial_input(message),
+            _initial_input(message, task.get("user_id") or task["thread_id"]),
             config=config,
             stream_mode="values",
         ):
@@ -151,11 +151,11 @@ async def run_conversation_task(
         return {"task_id": task_id, "state": "failed", "error": str(exc), "steps": steps}
 
 
-def _initial_input(message: str) -> dict[str, Any]:
+def _initial_input(message: str, user_id: str) -> dict[str, Any]:
     """构造图输入（延迟 import，避免测试环境拉起重依赖）。"""
     from langchain_core.messages import HumanMessage
 
-    return {"messages": [HumanMessage(content=message)]}
+    return {"messages": [HumanMessage(content=message)], "user_id": user_id}
 
 
 # ── 生产实现：DB / Redis / Celery ────────────────────────────────────────

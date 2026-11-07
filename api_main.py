@@ -100,6 +100,7 @@ class ConversationRequest(BaseModel):
 
     thread_id: str  # 会话唯一标识（同一 thread_id 多轮对话自动衔接）
     message: str  # 本轮用户消息
+    user_id: str | None = None  # 跨会话画像的身份；缺省回退 thread_id
 
 
 class AsyncConversationRequest(BaseModel):
@@ -215,8 +216,11 @@ async def lifespan(app: FastAPI):
     await ensure_task_states_table()
     # 异步任务表（阶段 C1）：与 task_states 分开，旧表一行不动
     from src.async_tasks_store import ensure_async_tasks_table
+    from src.memory.profile_context import ensure_user_profiles_table
 
     await ensure_async_tasks_table()
+    # 跨会话画像表（阶段 C3）：schema.sql 不会自动执行，这里幂等补齐
+    await ensure_user_profiles_table()
 
     # 2. 启动后台清理任务
     async def clean_interrupted_tasks():
@@ -718,7 +722,10 @@ async def chat_conversation(request: Request, body: ConversationRequest):
             # 五类事件：token（增量文本）/ tool_call / ping（心跳）/ final / error
             async for frame in stream_conversation(
                 graph,
-                {"messages": [HumanMessage(content=body.message)]},
+                {
+                    "messages": [HumanMessage(content=body.message)],
+                    "user_id": body.user_id or thread_id,
+                },
                 config,
                 is_disconnected=request.is_disconnected,
             ):
