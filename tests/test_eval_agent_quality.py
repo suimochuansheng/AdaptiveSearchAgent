@@ -106,3 +106,22 @@ def test_compare_reports_computes_deltas() -> None:
     assert diff["improved"] == 1
     assert diff["regressed"] == 0
     assert {row["id"]: row["delta"] for row in diff["rows"]} == {"q1": 0.0, "q2": 1.0}
+
+
+def test_compare_uses_only_common_questions() -> None:
+    """题集增删后，均值只按两边都有的题算——避免"加了新题就不可比"。"""
+    baseline = {
+        "summary": {"mean_score": 8.0},
+        "results": [{"id": "q1", "score": 8}, {"id": "q2", "score": 8}],
+    }
+    current = {
+        "summary": {"mean_score": 7.0},
+        "results": [{"id": "q1", "score": 8}, {"id": "q3", "score": 10}],
+    }
+
+    diff = compare_reports(baseline, current)
+
+    assert diff["common"] == 1
+    assert diff["only_baseline"] == ["q2"]
+    assert diff["only_current"] == ["q3"]
+    assert diff["mean_delta"] == 0.0  # q1 两边都是 8，新题 q3 不参与

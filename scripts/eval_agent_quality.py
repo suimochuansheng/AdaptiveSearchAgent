@@ -149,14 +149,21 @@ def compare_reports(baseline: dict[str, Any], current: dict[str, Any]) -> dict[s
         )
         rows.append({"id": qid, "baseline": base_score, "current": curr_score, "delta": delta})
 
-    comparable = [row["delta"] for row in rows if row["delta"] is not None]
-    base_mean = baseline.get("summary", {}).get("mean_score")
-    curr_mean = current.get("summary", {}).get("mean_score")
+    # 只按"两边都有分数"的题算均值：题集增删后也能比较，不会被新题拉偏
+    common = [row for row in rows if row["baseline"] is not None and row["current"] is not None]
+    base_mean = round(sum(row["baseline"] for row in common) / len(common), 2) if common else None
+    curr_mean = round(sum(row["current"] for row in common) / len(common), 2) if common else None
     mean_delta = (
         round(curr_mean - base_mean, 2) if base_mean is not None and curr_mean is not None else None
     )
+    comparable = [row["delta"] for row in common]
     return {
         "rows": rows,
+        "common": len(common),
+        "only_baseline": sorted(set(base_items) - set(current_items)),
+        "only_current": sorted(set(current_items) - set(base_items)),
+        "baseline_mean_common": base_mean,
+        "current_mean_common": curr_mean,
         "mean_delta": mean_delta,
         "improved": sum(1 for d in comparable if d > 0),
         "regressed": sum(1 for d in comparable if d < 0),
@@ -295,7 +302,12 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://localhost:8000", help="后端地址")
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET), help="题目 YAML")
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 题（冒烟用）")
-    parser.add_argument("--concurrency", type=int, default=3, help="并发题数")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="并发题数。默认 1：deep_research 是进程级单飞保护，高了会被拒或排队，分数失真",
+    )
     parser.add_argument("--timeout", type=float, default=300.0, help="单题超时（秒）")
     parser.add_argument(
         "--judge-model",
