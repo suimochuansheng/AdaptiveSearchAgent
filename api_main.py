@@ -23,10 +23,13 @@ if _ENV_FILE.exists():
 
 import asyncio
 import json
-import logging
+
+from src.utils.logger import get_logger
 
 # ——————————————————————————————————————日志记录工具加载开始————————————————————————————
-logger = logging.getLogger(__name__)
+# 用项目统一的 JSON logger（adaptive_agent，INFO 级、带 handler）；
+# 用 logging.getLogger(__name__) 会冒泡到 root 的 WARNING 默认级别，INFO 会静默丢失
+logger = get_logger()
 from contextlib import asynccontextmanager
 from datetime import UTC
 from typing import TYPE_CHECKING, Any, cast
@@ -157,6 +160,29 @@ async def set_task_state(thread_id: str, state: str, interrupt_time=None):
 
 
 # ---------- 后台维护：异步任务僵尸回收与清理（阶段 C2）----------
+async def maintain_async_tasks_once(
+    *,
+    requeue_stale,
+    fail_stale_exhausted,
+    purge_finished,
+    enqueue,
+) -> dict[str, int]:
+    """跑一轮维护，返回统计。
+
+    抽成独立函数是为了可测：日志漏打是"能测出来"的问题（验收时真的漏了）。
+    """
+    stale = await requeue_stale(settings.ASYNC_STALE_SECONDS, settings.ASYNC_MAX_ATTEMPTS)
+    for task_id in stale:
+        enqueue(task_id)
+    failed = await fail_stale_exhausted(settings.ASYNC_STALE_SECONDS, settings.ASYNC_MAX_ATTEMPTS)
+    purged = await purge_finished(settings.ASYNC_PURGE_DAYS)
+
+    stats = {"requeued": len(stale), "failed": failed, "purged": purged}
+    if any(stats.values()):
+        logger.info("异步任务维护完成", extra=stats)
+    return stats
+
+
 async def maintain_async_tasks_loop():
     """每 5 分钟回收一次僵尸异步任务，并清理过期终态行。
 
@@ -168,20 +194,14 @@ async def maintain_async_tasks_loop():
     from src.tasks_conversation import enqueue_conversation_task
 
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(settings.ASYNC_MAINTENANCE_INTERVAL_SECONDS)
         try:
-            stale = await requeue_stale(settings.ASYNC_STALE_SECONDS, settings.ASYNC_MAX_ATTEMPTS)
-            for task_id in stale:
-                enqueue_conversation_task(task_id)
-            failed = await fail_stale_exhausted(
-                settings.ASYNC_STALE_SECONDS, settings.ASYNC_MAX_ATTEMPTS
+            await maintain_async_tasks_once(
+                requeue_stale=requeue_stale,
+                fail_stale_exhausted=fail_stale_exhausted,
+                purge_finished=purge_finished,
+                enqueue=enqueue_conversation_task,
             )
-            purged = await purge_finished(settings.ASYNC_PURGE_DAYS)
-            if stale or failed or purged:
-                logger.info(
-                    "异步任务维护完成",
-                    extra={"requeued": len(stale), "failed": failed, "purged": purged},
-                )
         except Exception:  # noqa: BLE001 - 维护失败不能拖垮服务
             logger.exception("异步任务维护失败")
 

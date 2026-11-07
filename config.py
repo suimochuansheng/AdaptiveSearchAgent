@@ -147,6 +147,8 @@ class Settings(BaseSettings):
     ASYNC_MAX_ATTEMPTS: int = 2
     # 终态任务行保留天数（结果在 Redis 另有 TTL）
     ASYNC_PURGE_DAYS: int = 7
+    # 维护循环间隔（秒）：回收僵尸 + 清理终态行
+    ASYNC_MAINTENANCE_INTERVAL_SECONDS: int = 300
     # RAG 子服务熔断冷却时间（秒）：连接级失败后这段时间内直接跳过检索
     RAG_COOLDOWN_SECONDS: int = 60
     # deep_research 的执行后端：
