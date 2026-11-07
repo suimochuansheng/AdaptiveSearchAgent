@@ -240,3 +240,7 @@ def enqueue_conversation_task(task_id: str) -> None:
 async def read_result(task_id: str) -> str | None:
     """读取已完成任务的结果 JSON 字符串；未完成/过期返回 None。"""
     return await _RedisResultStore().get(RESULT_KEY_TEMPLATE.format(task_id=task_id))
+
+
+# 让 Worker 启动时一并注册画像抽取任务（import 即注册）
+import src.tasks_memory  # noqa: E402,F401

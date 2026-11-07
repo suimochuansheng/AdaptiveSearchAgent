@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import TYPE_CHECKING
 
@@ -171,6 +172,8 @@ class ConversationState(MessagesState):
     # 阶段 C3：身份与画像缓存（画像只读一次，之后每轮直接用缓存）
     user_id: str
     profile_context: str
+    # 已经为第几轮触发过画像抽取（防止同一轮里 agent 多次执行时重复入队）
+    profile_extract_upto: int
 
 
 def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
@@ -188,7 +191,7 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
         num_ctx=settings.ollama_num_ctx,
     ).bind_tools(TOOLS)
 
-    async def agent_node(state: ConversationState) -> dict:
+    async def agent_node(state: ConversationState, config: RunnableConfig) -> dict:
         # 每轮重新注入稳定区（system），旧轮次压成摘要，最近轮次保留原文
         # 画像属于稳定区：只在第一轮读一次 DB，之后用 state 里的缓存
         profile_context = state.get("profile_context") or ""
@@ -219,6 +222,29 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
             update["summary_upto"] = built.summary_upto
         if profile_context and profile_context != (state.get("profile_context") or ""):
             update["profile_context"] = profile_context
+
+        # ── 阶段 C3b：每满 N 轮触发一次异步画像抽取（不阻塞本轮回答）──
+        thread_id = ((config or {}).get("configurable") or {}).get("thread_id")
+        user_id = state.get("user_id") or ""
+        human_turns = sum(1 for m in state["messages"] if getattr(m, "type", None) == "human")
+        extract_upto = state.get("profile_extract_upto") or 0
+        should_extract = (
+            settings.MEMORY_ENABLED
+            and bool(user_id)
+            and bool(thread_id)
+            and human_turns > 0
+            and human_turns % settings.MEMORY_EXTRACT_EVERY_TURNS == 0
+            and human_turns > extract_upto
+        )
+        if should_extract:
+            try:
+                from src.tasks_memory import enqueue_profile_extraction
+
+                await asyncio.to_thread(enqueue_profile_extraction, str(thread_id), user_id)
+                update["profile_extract_upto"] = human_turns
+            except Exception:  # noqa: BLE001 - 队列不可用不能影响回答
+                logger.warning("画像抽取入队失败", extra={"user_id": user_id}, exc_info=True)
+
         return update
 
     tool_node = ToolNode(TOOLS)

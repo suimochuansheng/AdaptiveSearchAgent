@@ -163,6 +163,8 @@ class Settings(BaseSettings):
     MEMORY_PROFILE_TOKEN_BUDGET: int = 200
     # 每 N 轮触发一次异步抽取（写侧，C3b 接入）
     MEMORY_EXTRACT_EVERY_TURNS: int = 10
+    # 抽取时最多看最近多少条消息（控制成本）
+    MEMORY_EXTRACT_MAX_MESSAGES: int = 20
 
     # 异步任务触发阈值（秒），超过此阈值的请求将转换为后台任务
     ASYNC_TASK_THRESHOLD_SECONDS: int = 120
