@@ -8,13 +8,13 @@
 
 用法：
     # 1) 先跑基线（在基线提交上，起后端）
-    poetry run python scripts/eval_agent_quality.py --label baseline
+    poetry run python evals/agent_quality.py --label baseline
 
     # 2) 切到当前分支，起后端，再跑一次
-    poetry run python scripts/eval_agent_quality.py --label current
+    poetry run python evals/agent_quality.py --label current
 
     # 3) 对比（退出码非 0 表示平均分下降超过阈值，可直接接 CI）
-    poetry run python scripts/eval_agent_quality.py --compare <baseline.json>
+    poetry run python evals/agent_quality.py --compare <baseline.json>
 
 说明：
 - judge 默认用阿里云百炼的 qwen 模型（settings.ALIYUN_QWEN_*），与被测模型解耦；
@@ -45,7 +45,7 @@ from openai import OpenAI  # noqa: E402
 
 from config import settings  # noqa: E402
 
-DEFAULT_DATASET = _PROJ / "data" / "eval" / "qa_dataset_v3.yaml"
+DEFAULT_DATASET = _PROJ / "evals" / "datasets" / "qa_dataset_v3.yaml"
 # 必须与 Ragas 基线报告里的 judge_model 一致，否则两次分数不可比
 DEFAULT_JUDGE_MODEL = "qwen3.8-flash"
 from src.utils.report_paths import eval_report_dir  # noqa: E402

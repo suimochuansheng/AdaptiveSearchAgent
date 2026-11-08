@@ -1,0 +1,15 @@
+- id: smoke1
+  question: "PostgreSQL 的写入吞吐量是多少？"
+  ground_truth: "1,200 QPS"
+  source_file: "test_rag_spec.pdf"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["smoke"]
+
+- id: smoke2
+  question: "对于小规模数据集（小于 50 万条），建议使用什么索引？"
+  ground_truth: "HNSW 索引，构建速度快且检索精度高。"
+  source_file: "tech_blog.md"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["smoke"]

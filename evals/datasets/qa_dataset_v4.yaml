@@ -1,0 +1,210 @@
+# RAG 质量评估测试集 v4 — 第一轮基线（v3）之后的优化版
+#
+# v3 保持冻结，用于复现 2026-11-07 的第一轮基线；v4 用于下一轮对比。
+#
+# v4 相对 v3 的改动：
+#   1. source_file（单值）→ source_files（列表），支持“同一答案多篇文档都算命中”，
+#      配合评测脚本的 hit@k / 精排后 hit@k。
+#   2. 锚定模糊题干：
+#      - q001 “本文档” → 点明《RAG 解析流水线核心功能测试文档》
+#      - q009 Chroma 题改成“类型 + 混合检索支持情况”，避免单词答案
+#      - q016 “扫描” → `clean_interrupted_tasks` 里的 `asyncio.sleep`
+#      - q019 “设计文档” → 点明《自适应搜索与报告助手-设计文档》
+#   3. 新增 4 道 hard / 多跳题（q021-q024）：表格数值比较、索引取舍、
+#      interrupt 与锁/恢复的联动、表格物理顺序的原因。
+#
+# 文档仍然只用 eval_v3 的 6 篇：test_rag_spec.pdf / tech_blog.md /
+# 依据项目准备的面试题集.md / 请求追踪执行完整文档.md /
+# 自适应搜索与报告助手-设计文档.md / 前端对接后端测试用例-手动.md
+
+- id: q001
+  question: "《RAG 解析流水线核心功能测试文档》开头说明它专门用于验证 PDFLoader 的哪些能力？"
+  ground_truth: "验证 PDFLoader 的双栏布局提取、表格物理顺序混排以及低文本扫描件判定等核心工业级功能。"
+  source_files: ["test_rag_spec.pdf"]
+  category: "factual"
+  difficulty: "medium"
+  tags: ["解析", "双栏布局"]
+
+- id: q002
+  question: "PostgreSQL 的写入吞吐量是多少？"
+  ground_truth: "PostgreSQL + pgvector 的写入吞吐量是 1,200 QPS。"
+  source_files: ["test_rag_spec.pdf"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["PostgreSQL", "pgvector", "性能"]
+
+- id: q003
+  question: "子块（Child Chunk）的 Token 大小通常限制在多少？"
+  ground_truth: "子块的 Token 大小通常限制在 150 到 200 之间。"
+  source_files: ["test_rag_spec.pdf"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["分块策略", "Token"]
+
+- id: q004
+  question: "父子块双路索引的目的是什么？"
+  ground_truth: "当检索命中精细的子块时，自动关联并加载其背后的父块（约 800 Tokens）送入模型，平衡检索精度与生成上下文的完整度。"
+  source_files: ["test_rag_spec.pdf"]
+  category: "factual"
+  difficulty: "medium"
+  tags: ["分块策略", "索引"]
+
+- id: q005
+  question: "Milvus (Standalone) 的平均检索时延是多少？"
+  ground_truth: "Milvus (Standalone) 的平均检索时延是 4.2 ms。"
+  source_files: ["test_rag_spec.pdf"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["Milvus", "性能"]
+
+- id: q006
+  question: "Elasticsearch 的混合检索支持情况如何？"
+  ground_truth: "Elasticsearch 支持混合检索，且混合检索能力极其强大。"
+  source_files: ["test_rag_spec.pdf"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["Elasticsearch", "混合检索"]
+
+- id: q007
+  question: "对于小规模数据集（小于 50 万条），建议使用什么索引？"
+  ground_truth: "对于小规模数据集，建议使用 HNSW 索引，构建速度快且检索精度高。"
+  source_files: ["tech_blog.md"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["索引", "HNSW"]
+
+- id: q008
+  question: "对于大规模数据集，建议使用什么索引以减少内存占用？"
+  ground_truth: "对于大规模数据集，建议使用 IVF-PQ 索引以减少内存占用。"
+  source_files: ["tech_blog.md"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["索引", "IVF-PQ"]
+
+- id: q009
+  question: "tech_blog 的向量数据库对比表中，Chroma 的类型和混合检索支持情况分别是什么？"
+  ground_truth: "Chroma 是嵌入式类型，不支持混合检索。"
+  source_files: ["tech_blog.md"]
+  category: "summary"
+  difficulty: "medium"
+  tags: ["向量数据库", "对比"]
+
+- id: q010
+  question: "传统关键词检索（如 BM25）的局限是什么？"
+  ground_truth: "传统关键词检索无法理解语义。"
+  source_files: ["tech_blog.md"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["BM25", "检索"]
+
+- id: q011
+  question: "LangGraph 的 interrupt 会执行哪些动作？"
+  ground_truth: "保存当前 checkpoint 到持久化存储，抛出 GraphInterrupt 异常，暂停图执行，等待外部通过 Command(resume=...) 传入恢复指令。"
+  source_files: ["依据项目准备的面试题集.md"]
+  category: "factual"
+  difficulty: "medium"
+  tags: ["LangGraph", "HITL"]
+
+- id: q012
+  question: "LangGraph 的 Checkpoint 包含哪些内容？"
+  ground_truth: "Checkpoint 包含当前 AgentState 全量数据、图的执行位置、待处理的 pending 任务。"
+  source_files: ["依据项目准备的面试题集.md"]
+  category: "factual"
+  difficulty: "medium"
+  tags: ["LangGraph", "Checkpoint"]
+
+- id: q013
+  question: "LangGraph 的 Send API 如何实现并行搜索？"
+  ground_truth: "在条件边的路由函数中返回 list[Send]，框架自动并发执行这些任务，结果通过 operator.add 合并到共享状态。"
+  source_files: ["依据项目准备的面试题集.md"]
+  category: "summary"
+  difficulty: "medium"
+  tags: ["LangGraph", "Send", "并行"]
+
+- id: q014
+  question: "为什么 Agent 执行需要 Redis 分布式锁？"
+  ground_truth: "LangGraph 的 checkpoint 机制要求同一 thread_id 同时只有一个图在执行，否则会导致状态冲突，Redis 分布式锁保障了这一约束。"
+  source_files: ["依据项目准备的面试题集.md"]
+  category: "factual"
+  difficulty: "medium"
+  tags: ["Redis", "并发安全"]
+
+- id: q015
+  question: "应用启动阶段 lifespan 主要做哪些事？"
+  ground_truth: "初始化 checkpointer、确保任务状态表存在、启动后台清理任务。"
+  source_files: ["请求追踪执行完整文档.md"]
+  category: "factual"
+  difficulty: "medium"
+  tags: ["FastAPI", "lifespan"]
+
+- id: q016
+  question: "`clean_interrupted_tasks` 协程中 `asyncio.sleep` 的间隔是多少秒？"
+  ground_truth: "每 60 秒执行一次（asyncio.sleep(60)）。"
+  source_files: ["请求追踪执行完整文档.md"]
+  category: "factual"
+  difficulty: "medium"
+  tags: ["清理任务", "并发"]
+
+- id: q017
+  question: "SSE 流式响应的 media_type 是什么？"
+  ground_truth: "SSE 流式响应的 media_type 是 text/event-stream。"
+  source_files: ["请求追踪执行完整文档.md"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["SSE", "FastAPI"]
+
+- id: q018
+  question: "自适应搜索中 Evaluator 判断信息充分性的置信度阈值是多少？"
+  ground_truth: "置信度 ≥ 0.8 才通过。"
+  source_files: ["自适应搜索与报告助手-设计文档.md"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["Evaluator", "置信度"]
+
+- id: q019
+  question: "《自适应搜索与报告助手-设计文档》的面试话术中提到的 JSON 解析成功率是多少？"
+  ground_truth: "JSON 解析成功率是 97%。"
+  source_files: ["自适应搜索与报告助手-设计文档.md"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["性能", "指标"]
+
+- id: q020
+  question: "中断审批拒绝后，助手气泡更新为什么内容？"
+  ground_truth: "❌ 用户取消了生成。"
+  source_files: ["前端对接后端测试用例-手动.md"]
+  category: "factual"
+  difficulty: "easy"
+  tags: ["测试", "HITL"]
+
+- id: q021
+  question: "PostgreSQL + pgvector 与 Milvus (Standalone) 的写入吞吐量和平均检索时延分别是多少？按这两项指标，哪个更适合高写入、低时延场景？"
+  ground_truth: "PostgreSQL + pgvector 是 1,200 QPS、8.5 ms；Milvus (Standalone) 是 3,500 QPS、4.2 ms。Milvus 的写入吞吐更高、时延更低，更适合高写入、低时延场景。"
+  source_files: ["test_rag_spec.pdf"]
+  category: "multi_hop"
+  difficulty: "hard"
+  tags: ["性能对比", "Milvus", "PostgreSQL"]
+
+- id: q022
+  question: "tech_blog 建议小规模数据集用 HNSW、大规模用 IVF-PQ；这两种索引分别优先解决什么问题？"
+  ground_truth: "HNSW 构建速度快、检索精度高，适合小规模数据集；IVF-PQ 主要用于减少大规模数据集的内存占用。"
+  source_files: ["tech_blog.md"]
+  category: "summary"
+  difficulty: "hard"
+  tags: ["索引", "HNSW", "IVF-PQ"]
+
+- id: q023
+  question: "interrupt 暂停图执行后，为什么同一 thread_id 的锁不会被释放？恢复时又通过什么机制继续执行？"
+  ground_truth: "interrupt 暂停图执行时不释放分布式锁，以保证同一 thread_id 同时只有一个图在执行；恢复时通过 Command(resume=...) 从 interrupt 处继续执行。"
+  source_files: ["依据项目准备的面试题集.md", "请求追踪执行完整文档.md"]
+  category: "multi_hop"
+  difficulty: "hard"
+  tags: ["LangGraph", "interrupt", "Redis"]
+
+- id: q024
+  question: "test_rag_spec 的表格顺序测试为什么要求输出保持“正文 1 → 表格 → 正文 2”，而不是把表格统一放到页面底部？"
+  ground_truth: "为了验证解析器能否保持表格在原始页面中的物理阅读顺序，而不是把表格无脑堆砌到页面最下方。"
+  source_files: ["test_rag_spec.pdf"]
+  category: "multi_hop"
+  difficulty: "hard"
+  tags: ["解析", "表格顺序"]

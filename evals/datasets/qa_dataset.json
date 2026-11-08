@@ -1,0 +1,102 @@
+[
+    {
+        "question": "RAG 解析流水线中，双栏布局测试的目的是什么？",
+        "ground_truth": "验证 PDF 解析器能否正确还原双栏页面的物理阅读顺序。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "PostgreSQL + pgvector 的写入吞吐量是多少？",
+        "ground_truth": "1,200 QPS",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "子块（Child Chunk）的 Token 大小通常限制在多少？",
+        "ground_truth": "150 到 200",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "为什么解析模块的健壮性直接影响下游检索精准度？",
+        "ground_truth": "如果解析出的文本格式混乱、顺序颠倒，即使使用最先进的向量模型，也无法召回正确的上下文。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "父子块双路索引的目的是什么？",
+        "ground_truth": "当检索命中精细的子块时，自动关联并加载其背后的父块（约800 Tokens）送入模型，平衡检索精度与生成上下文的完整度。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "什么是大模型的'迷失在中间'（Lost in the Middle）现象？",
+        "ground_truth": "过长的无用信息会导致大模型在生成时无法有效利用位于上下文中间部分的信息。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "Milvus 的平均检索时延是多少？",
+        "ground_truth": "4.2 ms",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "Elasticsearch 是否支持混合检索？",
+        "ground_truth": "支持，且混合检索能力极其强大。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "三种向量存储引擎中，哪个内存占用最大？",
+        "ground_truth": "Elasticsearch 内存占用较大。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "为什么 PostgreSQL 成为中小规模企业级 RAG 的首选方案？",
+        "ground_truth": "因为 PostgreSQL 拥有优秀的混合检索支持和极低的额外运维成本。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "基准测试的服务器配置是什么？",
+        "ground_truth": "单台 16 核 32G 内存的服务器。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "测试中使用的向量模型是什么？",
+        "ground_truth": "nomic-embed-text",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "pgvector 使用什么算法计算向量相似度？",
+        "ground_truth": "余弦相似度（Cosine Similarity）。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "低文本与图像占比测试的目的是什么？",
+        "ground_truth": "触发 PDFLoader 的扫描件判定逻辑，激活 OCR 降级识别流程。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "什么是 HITL？在当前产品中的应用场景是什么？",
+        "ground_truth": "HITL（Human-in-the-Loop）即人机协同确认，在文档摄入流水线中用于用户确认解析结果。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "同时支持全文本和向量检索的存储引擎有哪些？",
+        "ground_truth": "PostgreSQL + pgvector 和 Elasticsearch。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "Milvus (Standalone) 的写入吞吐量是多少？",
+        "ground_truth": "3,500 QPS",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "基准测试中测试了多少条标准中文知识库文档？",
+        "ground_truth": "10 万条",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "精细分块策略的主要作用是什么？",
+        "ground_truth": "可以极大减少检索噪声，将子块 Token 限制在 150-200 之间确保检索精度。",
+        "source_file": "test_rag_spec.pdf"
+    },
+    {
+        "question": "OCR 降级识别流程在什么条件下会被激活？",
+        "ground_truth": "当页面文本字符数极少（低于阈值）且图像面积占比较大时。",
+        "source_file": "test_rag_spec.pdf"
+    }
+]

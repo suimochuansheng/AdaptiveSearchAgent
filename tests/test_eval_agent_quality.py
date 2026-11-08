@@ -5,7 +5,7 @@
 
 import json
 
-from scripts.eval_agent_quality import (
+from evals.agent_quality import (
     build_judge_prompt,
     compare_reports,
     parse_judge_score,

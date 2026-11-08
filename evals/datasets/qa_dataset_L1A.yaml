@@ -1,0 +1,53 @@
+# RAG 质量评估测试集 — L1-A 组（文档内可答题，排除 db_id=14 表格题）
+# 来源：L1测试题候选.md（10 道，排除 Milvus 写入吞吐量）
+# 字段：id / question / ground_truth / source_file
+
+- id: l1a001
+  question: "根据文档开头，本文档专门用于验证 PDFLoader 的哪些核心工业级功能？"
+  ground_truth: "双栏布局提取、表格物理顺序混排、低文本扫描件判定。"
+  source_file: "test_rag_spec.pdf"
+
+- id: l1a002
+  question: "文档指出，如果解析出的文本格式混乱、顺序颠倒，会导致什么后果？"
+  ground_truth: "即使使用最先进的向量模型，也无法召回正确的上下文。"
+  source_file: "test_rag_spec.pdf"
+
+- id: l1a003
+  question: "为了确保检索的绝对精度，文档提到子块（Child Chunks）的 Token 大小通常限制在什么范围？"
+  ground_truth: "150 到 200 之间。"
+  source_file: "test_rag_spec.pdf"
+
+- id: l1a004
+  question: "文档提到，系统通过计算什么来找出与用户查询最相关的文本切块？"
+  ground_truth: "余弦相似度（Cosine Similarity）。"
+  source_file: "test_rag_spec.pdf"
+
+- id: l1a005
+  question: "文档指出，过长的无用信息会导致大语言模型在生成时出现什么现象？"
+  ground_truth: "' 迷失在中间 '（ Lost  in  the Middle ）现象。"
+  source_file: "test_rag_spec.pdf"
+
+- id: l1a006
+  question: "采用父子块双路索引时，当检索命中精细的子块后，系统会自动关联并加载什么送入模型？"
+  ground_truth: "其背后的父块（约 800 Tokens）。"
+  source_file: "test_rag_spec.pdf"
+
+- id: l1a007
+  question: "在表格物理顺序提取测试中，优秀的解析器应该在输出中保持怎样的物理阅读顺序？"
+  ground_truth: "' 正文 1 ➔ Markdown 表格 ➔ 正文 2' 的物理阅读顺序。"
+  source_file: "test_rag_spec.pdf"
+
+- id: l1a008
+  question: "根据评测结果分析，PostgreSQL 凭借哪两点成为了中小规模企业级 RAG 落地时的首选方案？"
+  ground_truth: "极其优秀的混合检索支持（ Hybrid Search ）以及极低的额外运维成本。"
+  source_file: "test_rag_spec.pdf"
+
+- id: l1a009
+  question: "在低文本与图像占比测试的本地图片 OCR 描述中，前景角色的粉发女性有什么外貌特征？"
+  ground_truth: "穿着一件带有黄色内衬的白色夹克，戴着黑色手套，正对着镜头做出“V”字手势。"
+  source_file: "test_rag_spec.pdf"
+
+- id: l1a010
+  question: "根据文档提示，什么条件应该能够成功激活解析器的 OCR 降级识别流程？"
+  ground_truth: "此页面文本字符数极少（低于阈值），且图像面积占比较大。"
+  source_file: "test_rag_spec.pdf"

@@ -73,7 +73,7 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "C", "B", "UP", "SIM", "TCH"]
 ignore = ["E501"]  # 行长度交给格式化器
-per-file-ignores = { "api_main.py" = ["E402"], "scripts/*.py" = ["E402"] }  # load_dotenv/sys.path 必须先于 import
+per-file-ignores = { "api_main.py" = ["E402"], "scripts/*.py" = ["E402"], "evals/*.py" = ["E402"] }  # load_dotenv/sys.path 必须先于 import
 
 [tool.ruff.format]
 quote-style = "double"
@@ -96,6 +96,7 @@ ignore_missing_imports = true
 exclude = [
     "frontend/",
     "scripts/",
+    "evals/",
 ]
 
 [tool.poetry.scripts] # 定义命令行脚本

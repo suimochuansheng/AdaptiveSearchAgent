@@ -1,0 +1,169 @@
+# RAG 质量评估测试集 v3 — 修复版
+# 修复内容：
+#   1. 删除/重写无效题（原 q015 HITL 题：参考答案不在所标注源文档中）
+#   2. 题目打散到 6 篇文档（旧版 20 题全部集中在 test_rag_spec.pdf）
+#   3. 表格段题目 ≤3，题干贴近原文关键词（长锚定句会稀释 BM25/向量检索）
+#   4. 参考答案尽量与原文逐句对齐，降低 RAGAS 句子级判定误差
+#
+# 文档分布：test_rag_spec.pdf ×6 / tech_blog.md ×4 / 面试题集 ×4 /
+#           请求追踪执行完整文档 ×3 / 设计文档 ×2 / 前端对接测试用例 ×1
+
+- id: q001
+  question: "本文档专门用于验证 PDFLoader 的哪些功能？"
+  ground_truth: "验证 PDFLoader 的双栏布局提取、表格物理顺序混排以及低文本扫描件判定等核心工业级功能。"
+  source_file: "test_rag_spec.pdf"
+  category: "factual"
+  difficulty: "medium"
+  tags: ["解析", "双栏布局"]
+
+- id: q002
+  question: "PostgreSQL 的写入吞吐量是多少？"
+  ground_truth: "1,200 QPS"
+  source_file: "test_rag_spec.pdf"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["PostgreSQL", "pgvector", "性能"]
+
+- id: q003
+  question: "子块（Child Chunk）的 Token 大小通常限制在多少？"
+  ground_truth: "150 到 200"
+  source_file: "test_rag_spec.pdf"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["分块策略", "Token"]
+
+- id: q004
+  question: "父子块双路索引的目的是什么？"
+  ground_truth: "当检索命中精细的子块时，自动关联并加载其背后的父块（约800 Tokens）送入模型，平衡检索精度与生成上下文的完整度。"
+  source_file: "test_rag_spec.pdf"
+  category: "factual"
+  difficulty: "medium"
+  tags: ["分块策略", "索引"]
+
+- id: q005
+  question: "Milvus 的平均检索时延是多少？"
+  ground_truth: "4.2 ms"
+  source_file: "test_rag_spec.pdf"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["Milvus", "性能"]
+
+- id: q006
+  question: "Elasticsearch 的混合检索支持情况如何？"
+  ground_truth: "支持，且混合检索能力极其强大。"
+  source_file: "test_rag_spec.pdf"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["Elasticsearch", "混合检索"]
+
+- id: q007
+  question: "对于小规模数据集（小于 50 万条），建议使用什么索引？"
+  ground_truth: "HNSW 索引，构建速度快且检索精度高。"
+  source_file: "tech_blog.md"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["索引", "HNSW"]
+
+- id: q008
+  question: "对于大规模数据集，建议使用什么索引以减少内存占用？"
+  ground_truth: "IVF-PQ 索引。"
+  source_file: "tech_blog.md"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["索引", "IVF-PQ"]
+
+- id: q009
+  question: "tech_blog 的向量数据库对比表中，哪种数据库是嵌入式类型且不支持混合检索？"
+  ground_truth: "Chroma。"
+  source_file: "tech_blog.md"
+  category: "summary"
+  difficulty: "medium"
+  tags: ["向量数据库", "对比"]
+
+- id: q010
+  question: "传统关键词检索（如 BM25）的局限是什么？"
+  ground_truth: "无法理解语义。"
+  source_file: "tech_blog.md"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["BM25", "检索"]
+
+- id: q011
+  question: "LangGraph 的 interrupt 会执行哪些动作？"
+  ground_truth: "保存当前 checkpoint 到持久化存储，抛出 GraphInterrupt 异常，暂停图执行，等待外部通过 Command(resume=...) 传入恢复指令。"
+  source_file: "依据项目准备的面试题集.md"
+  category: "factual"
+  difficulty: "medium"
+  tags: ["LangGraph", "HITL"]
+
+- id: q012
+  question: "LangGraph 的 Checkpoint 包含哪些内容？"
+  ground_truth: "当前 AgentState 全量数据、图的执行位置、待处理的 pending 任务。"
+  source_file: "依据项目准备的面试题集.md"
+  category: "factual"
+  difficulty: "medium"
+  tags: ["LangGraph", "Checkpoint"]
+
+- id: q013
+  question: "LangGraph 的 Send API 如何实现并行搜索？"
+  ground_truth: "Send API 是 LangGraph 内置的并行执行机制，在条件边的路由函数中返回 list[Send]，框架自动并发执行这些任务，结果通过 operator.add 合并到共享状态。"
+  source_file: "依据项目准备的面试题集.md"
+  category: "summary"
+  difficulty: "medium"
+  tags: ["LangGraph", "Send", "并行"]
+
+- id: q014
+  question: "为什么 Agent 执行需要 Redis 分布式锁？"
+  ground_truth: "LangGraph 的 checkpoint 机制要求同一 thread_id 同时只有一个图在执行，否则会导致状态冲突，Redis 分布式锁保障了这一约束。"
+  source_file: "依据项目准备的面试题集.md"
+  category: "factual"
+  difficulty: "medium"
+  tags: ["Redis", "并发安全"]
+
+- id: q015
+  question: "应用启动阶段 lifespan 主要做哪些事？"
+  ground_truth: "初始化 checkpointer、确保任务状态表存在、启动后台清理任务。"
+  source_file: "请求追踪执行完整文档.md"
+  category: "factual"
+  difficulty: "medium"
+  tags: ["FastAPI", "lifespan"]
+
+- id: q016
+  question: "后台清理任务每隔多少秒扫描一次超时的 interrupted 会话？"
+  ground_truth: "每 60 秒。"
+  source_file: "请求追踪执行完整文档.md"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["清理任务", "并发"]
+
+- id: q017
+  question: "SSE 流式响应的 media_type 是什么？"
+  ground_truth: "text/event-stream。"
+  source_file: "请求追踪执行完整文档.md"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["SSE", "FastAPI"]
+
+- id: q018
+  question: "自适应搜索中 Evaluator 判断信息充分性的置信度阈值是多少？"
+  ground_truth: "置信度 ≥ 0.8 才通过。"
+  source_file: "自适应搜索与报告助手-设计文档.md"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["Evaluator", "置信度"]
+
+- id: q019
+  question: "设计文档记录的 JSON 解析成功率是多少？"
+  ground_truth: "97%。"
+  source_file: "自适应搜索与报告助手-设计文档.md"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["性能", "指标"]
+
+- id: q020
+  question: "中断审批拒绝后，助手气泡更新为什么内容？"
+  ground_truth: "❌ 用户取消了生成。"
+  source_file: "前端对接后端测试用例-手动.md"
+  category: "factual"
+  difficulty: "easy"
+  tags: ["测试", "HITL"]
