@@ -167,7 +167,7 @@ curl -X POST http://localhost:8000/demo/tools \
 
 - Docker（用于 PostgreSQL + Redis）
 - Poetry（Python 依赖管理）
-- Ollama + 已下载模型 `qwen2.5:7b`
+- Ollama + 已下载模型 `qwen35-9b-official`
 - RAG 子服务已独立部署（见 [rag-ingest-gateway](https://github.com/suimochuansheng/rag-ingest-gateway)），与主服务放在同一父目录
 
 ```bash

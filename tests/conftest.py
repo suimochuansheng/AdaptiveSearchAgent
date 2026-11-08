@@ -23,10 +23,16 @@ def create_test_state(overrides: dict[str, Any] | None = None) -> AgentState:
         "retry_keywords": [],
         "iteration": 0,
         "final_report": "",
-        "human_approved": False,
+        "hitl_decision": None,
         "task_id": "test-id",
         "total_tokens": 0,
         "pending_keywords": [],
+        "_search_accum": [],
+        "user_feedback": None,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "current_llm": None,
+        "_batch_keywords": [],
     }
     if overrides:
         defaults.update(overrides)  # type: ignore[typeddict-item]

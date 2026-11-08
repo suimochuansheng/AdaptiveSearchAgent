@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from psycopg_pool import AsyncConnectionPool as Pool
+if TYPE_CHECKING:
+    from psycopg_pool import AsyncConnectionPool as Pool
 
 from src.checkpointer import get_checkpointer
 from src.utils.logger import get_logger
@@ -50,7 +51,7 @@ class UserProfileStore:
                 "FROM user_profiles WHERE user_id = %s",
                 (user_id,),
             )
-            row = cast(dict[str, Any] | None, await cur.fetchone())
+            row = cast("dict[str, Any] | None", await cur.fetchone())
 
         if row is None:
             return {
@@ -75,10 +76,9 @@ class UserProfileStore:
     ) -> None:
         """插入或合并更新用户画像。"""
         pool = await self._ensure_pool()
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
                     INSERT INTO user_profiles
                         (user_id, preferred_language, answer_style, recent_topics, updated_at)
                     VALUES (%s, %s, %s, %s, NOW())
@@ -88,8 +88,8 @@ class UserProfileStore:
                         recent_topics     = COALESCE(EXCLUDED.recent_topics,     user_profiles.recent_topics),
                         updated_at        = NOW()
                     """,
-                    (user_id, preferred_language, answer_style, recent_topics),
-                )
+                (user_id, preferred_language, answer_style, recent_topics),
+            )
 
         logger.info(
             "User profile upserted",

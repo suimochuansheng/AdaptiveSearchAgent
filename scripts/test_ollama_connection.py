@@ -136,7 +136,7 @@ async def test_ollama_connection():  # noqa: C901
     embedding_model = EMBEDDING_MODEL
     print_info(f"📡 使用的 Embedding 模型: {embedding_model}")
 
-    # 检查模型是否已安装（Ollama 返回的模型名带 tag，如 nomic-embed-text:latest，需去掉 tag 再匹配）
+    # 检查模型是否已安装（Ollama 返回的模型名带 tag，如 bge-m3:latest，需去掉 tag 再匹配）
     installed_models = [m.split(":")[0] for m in model_names]
     if embedding_model not in installed_models:
         print_warn(f"⚠️ 模型 '{embedding_model}' 未安装")

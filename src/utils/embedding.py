@@ -1,4 +1,4 @@
-"""嵌入模型工具 — 基于 Ollama nomic-embed-text。
+"""嵌入模型工具 — 基于 Ollama bge-m3。
 
 零额外依赖（复用已有 Ollama 基础设施），httpx 异步调用。
 """
@@ -7,12 +7,12 @@ import httpx
 
 from config import settings
 
-EMBEDDING_MODEL = "nomic-embed-text"
-EMBEDDING_DIM = 768  # nomic-embed-text 输出维度
+EMBEDDING_MODEL = "bge-m3"
+EMBEDDING_DIM = 1024  # bge-m3 输出维度
 
 
 async def embed_text(text: str) -> list[float]:
-    """将文本转为向量嵌入（768 维）。"""
+    """将文本转为向量嵌入（1024 维）。"""
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{settings.ollama_base_url}/api/embeddings",

@@ -21,7 +21,7 @@ async def search_worker(state: dict) -> dict:
     kb_id: str = state.get("kb_id", "default")
 
     # 并行检索
-    rag_task = search_knowledge(keyword, top_k=3, kb_id=kb_id)
+    rag_task = search_knowledge(keyword, top_k=3, kb_id=kb_id, model="bge-m3")
     web_task = search_tavily(keyword)
 
     rag_result: str | Exception

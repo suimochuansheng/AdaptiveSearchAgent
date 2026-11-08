@@ -21,7 +21,7 @@
     python scripts/cleanup_vectors.py --reindex
 
 涉及表:
-    - knowledge_embeddings  (Agent 对话助手 + rag_data_dispose 共用)
+    - knowledge_embeddings_bgem3  (Agent 对话助手 + rag_data_dispose 共用)
 """
 
 from __future__ import annotations
@@ -50,9 +50,9 @@ def _build_conninfo() -> str:
 
 
 async def show_current_state(conn: psycopg.AsyncConnection) -> None:
-    """展示 knowledge_embeddings 表当前状态。"""
+    """展示 knowledge_embeddings_bgem3 表当前状态。"""
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT COUNT(*) AS total FROM knowledge_embeddings")
+        await cur.execute("SELECT COUNT(*) AS total FROM knowledge_embeddings_bgem3")
         row = await cur.fetchone()
         total = row["total"] if row else 0
         print(f"  总行数: {total}")
@@ -60,7 +60,7 @@ async def show_current_state(conn: psycopg.AsyncConnection) -> None:
         if total > 0:
             await cur.execute("""
                 SELECT kb_id, source_file, COUNT(*) AS cnt
-                FROM knowledge_embeddings
+                FROM knowledge_embeddings_bgem3
                 GROUP BY kb_id, source_file
                 ORDER BY kb_id, cnt DESC
             """)
@@ -110,7 +110,7 @@ async def cleanup_vectors(
         # ── 2. 查询待删除行数 ──
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                f"SELECT COUNT(*) AS cnt FROM knowledge_embeddings {where_clause}",
+                f"SELECT COUNT(*) AS cnt FROM knowledge_embeddings_bgem3 {where_clause}",
                 params,
             )
             row = await cur.fetchone()
@@ -126,7 +126,7 @@ async def cleanup_vectors(
             await cur.execute(
                 f"""
                 SELECT kb_id, source_file, COUNT(*) AS cnt
-                FROM knowledge_embeddings
+                FROM knowledge_embeddings_bgem3
                 {where_clause}
                 GROUP BY kb_id, source_file
                 ORDER BY kb_id, cnt DESC
@@ -144,7 +144,7 @@ async def cleanup_vectors(
         # ── 4. 执行删除 ──
         async with conn.cursor() as cur:
             await cur.execute(
-                f"DELETE FROM knowledge_embeddings {where_clause}",
+                f"DELETE FROM knowledge_embeddings_bgem3 {where_clause}",
                 params,
             )
         print(f"\n🗑️  已删除 {delete_count} 行。")
@@ -152,7 +152,7 @@ async def cleanup_vectors(
         # ── 5. 重置序列（全表清理时） ──
         if kb_id is None and source_file is None:
             async with conn.cursor() as cur:
-                await cur.execute("ALTER SEQUENCE knowledge_embeddings_id_seq RESTART WITH 1")
+                await cur.execute("ALTER SEQUENCE knowledge_embeddings_bgem3_id_seq RESTART WITH 1")
             print("🔄 已重置 id 序列 (RESTART WITH 1)。")
 
         # ── 6. 重建向量索引（可选） ──
@@ -162,7 +162,7 @@ async def cleanup_vectors(
                 await cur.execute("DROP INDEX IF EXISTS idx_knowledge_embedding")
                 await cur.execute("""
                     CREATE INDEX idx_knowledge_embedding
-                    ON knowledge_embeddings
+                    ON knowledge_embeddings_bgem3
                     USING ivfflat (embedding vector_cosine_ops)
                     WITH (lists = 10)
                 """)
@@ -180,7 +180,7 @@ async def cleanup_vectors(
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
-        description="清理 PostgreSQL pgvector 向量库 (knowledge_embeddings 表)",
+        description="清理 PostgreSQL pgvector 向量库 (knowledge_embeddings_bgem3 表，bge-m3)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -225,7 +225,7 @@ async def main() -> None:
     # ── 展示当前状态 ──
     print("=" * 60)
     print("  PostgreSQL 向量库清理工具")
-    print("  目标表: knowledge_embeddings")
+    print("  目标表: knowledge_embeddings_bgem3")
     print("=" * 60)
     print("\n📊 当前状态:")
     conn = await psycopg.AsyncConnection.connect(conninfo, autocommit=True)
@@ -246,7 +246,7 @@ async def main() -> None:
         scope = " AND ".join(filter_desc) if filter_desc else "全部数据"
 
         if not args.yes:
-            print("\n⚠️  即将清理 knowledge_embeddings 表中符合条件的数据")
+            print("\n⚠️  即将清理 knowledge_embeddings_bgem3 表中符合条件的数据")
             print(f"   条件: {scope}")
             resp = input("\n确认执行? [y/N]: ").strip().lower()
             if resp not in ("y", "yes"):

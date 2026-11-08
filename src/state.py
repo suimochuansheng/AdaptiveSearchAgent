@@ -6,7 +6,7 @@ LangGraph 中各节点通过读取和写入此状态来协作完成搜索任务�
 """
 
 import operator
-from typing import Annotated, Any
+from typing import Annotated, Any, NotRequired
 
 from typing_extensions import TypedDict
 
@@ -62,7 +62,7 @@ class AgentState(TypedDict):
     # 结果评估
     confidence_score: float
     missing_info: str
-    user_feedback: str  # 用户在“缺失信息补全”中断中补充的信息（为空表示无补充）
+    user_feedback: NotRequired[str | None]  # 用户在“缺失信息补全”中断中补充的信息（为空表示无补充）
 
     # 最终输出
     final_report: str
@@ -72,11 +72,11 @@ class AgentState(TypedDict):
     total_tokens: Annotated[int, operator.add]
     input_tokens: Annotated[int, operator.add]
     output_tokens: Annotated[int, operator.add]
-    current_llm: str
+    current_llm: NotRequired[str | None]
 
     # 分批 wave 所需字段
     pending_keywords: list[str]
     _batch_keywords: list[str]
 
     # HITL 高成本搜索前置确认结果：confirmed=放行搜索 / cancelled=取消搜索
-    hitl_decision: str
+    hitl_decision: NotRequired[str | None]

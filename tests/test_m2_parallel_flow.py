@@ -358,18 +358,25 @@ class TestMultiWaveIntegration:
         from src.agents.planner import planner
 
         state: AgentState = {
-            "user_query": "测试问题",
+            "user_query": "测试查询",  # 替换原来的 messages
             "iteration": 0,
             "plan": [],
+            "retry_keywords": [],
             "search_results": [],
+            "_search_accum": [],
             "confidence_score": 0.0,
             "missing_info": "",
-            "retry_keywords": [],
             "final_report": "",
-            "human_approved": False,
-            "task_id": "m2-manual-test",
+            "task_id": "test-task",
             "total_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
             "pending_keywords": [],
+            "_batch_keywords": [],
+            # NotRequired 的三个可以不写，也可以显式给 None
+            # "user_feedback": None,
+            # "current_llm": None,
+            # "hitl_decision": None,
         }
 
         with (

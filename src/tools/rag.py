@@ -45,7 +45,7 @@ async def search_knowledge(
     query: str,
     top_k: int = 3,
     kb_id: str = "default",
-    model: str = "nomic-embed",  # ★ 新增 model 参数
+    model: str = "bge-m3",  # 仅 bge-m3（nomic 已下线）
     search_mode: str = "hybrid",  # ★ 检索模式：hybrid(BM25+向量RRF+网关侧Reranker) / vector(纯向量)
     skip_reranker: bool = False,  # ★ 跳过网关侧 Reranker（离线评估用）
 ) -> str:
@@ -56,7 +56,7 @@ async def search_knowledge(
         query:  检索查询文本。
         top_k:  返回的最相关结果数量。
         kb_id:  目标知识库 ID。
-        model: Embedding 模型 (nomic-embed 或 bge-m3)
+        model: Embedding 模型（仅 bge-m3）
         search_mode: 检索模式 (hybrid 或 vector)
 
     Returns:
