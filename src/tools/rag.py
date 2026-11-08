@@ -51,7 +51,7 @@ async def search_knowledge(
 ) -> str:
     """调用子服务 /api/v1/search 进行向量检索。
     通过 HTTP 调用子服务的 /search 接口进行 RAG 检索。
-    超时 10 秒，若失败则返回空字符串（降级处理）。
+    超时 RAG_TIMEOUT_SECONDS（默认 30s），若失败则返回空字符串（降级处理）。
     Args:
         query:  检索查询文本。
         top_k:  返回的最相关结果数量。
@@ -71,7 +71,7 @@ async def search_knowledge(
     url = f"{settings.INGEST_SERVICE_URL}/api/v1/search"
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=settings.RAG_TIMEOUT_SECONDS) as client:
             resp = await client.post(
                 url,
                 json={

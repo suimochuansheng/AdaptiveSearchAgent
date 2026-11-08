@@ -151,6 +151,8 @@ class Settings(BaseSettings):
     ASYNC_MAINTENANCE_INTERVAL_SECONDS: int = 300
     # RAG 子服务熔断冷却时间（秒）：连接级失败后这段时间内直接跳过检索
     RAG_COOLDOWN_SECONDS: int = 60
+    # RAG 检索 HTTP 超时（秒）：BGE 精排单次约 10~11s，原 10s 会稳定超时
+    RAG_TIMEOUT_SECONDS: float = 30.0
     # deep_research 的执行后端：
     #   workflow = 真跑旧 workflow 图（默认，行为与现在一致）
     #   stub     = 假图（开发期用：秒回、不依赖 RAG/Ollama 子服务）
