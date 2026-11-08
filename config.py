@@ -165,6 +165,8 @@ class Settings(BaseSettings):
     MEMORY_EXTRACT_EVERY_TURNS: int = 10
     # 抽取时最多看最近多少条消息（控制成本）
     MEMORY_EXTRACT_MAX_MESSAGES: int = 20
+    # 评测报告输出目录（空 = 默认 ../文档/项目/AdaptiveSearchAgent/评测报告）
+    EVAL_REPORT_DIR: str = ""
 
     # 异步任务触发阈值（秒），超过此阈值的请求将转换为后台任务
     ASYNC_TASK_THRESHOLD_SECONDS: int = 120

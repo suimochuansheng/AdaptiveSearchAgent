@@ -48,7 +48,9 @@ from config import settings  # noqa: E402
 DEFAULT_DATASET = _PROJ / "data" / "eval" / "qa_dataset_v3.yaml"
 # 必须与 Ragas 基线报告里的 judge_model 一致，否则两次分数不可比
 DEFAULT_JUDGE_MODEL = "qwen3.8-flash"
-REPORT_DIR = _PROJ / "docs" / "test_reports"
+from src.utils.report_paths import eval_report_dir  # noqa: E402
+
+REPORT_DIR = eval_report_dir()
 
 JUDGE_SYSTEM_PROMPT = """你是严格的答案评分员。给你：问题、参考答案、被测系统的回答。
 请按 1~10 分给"回答正确性"打分：
