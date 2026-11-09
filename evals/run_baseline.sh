@@ -20,13 +20,12 @@
 #   TIMEOUT=120                   单任务超时（秒）
 #   RERANKER=ms-marco|bge         默认 bge（BGE 精排；首次会加载 2.2G 模型）
 #   TAG=<归档名>                  默认 时间戳_model_reranker_dataset
-#   INGEST_URL=http://localhost:8100   评测脚本调用的 RAG 子服务
-#   START_NATIVE_GATEWAY=auto|always|never
-#        auto   = 8100 搜索不可用时，自动在 8101 起一个 WSL 原生网关（默认）
-#        always = 总是起原生网关
-#        never  = 不起，直接报错
-#   GATEWAY_DIR=../rag-ingest-gateway  原生网关目录
-#   GATEWAY_PORT=8101
+#   INGEST_URL=http://localhost:8100   评测脚本调用的 RAG 网关（必须是已启动的 ingest_dev）
+#
+# 前置条件：RAG 网关必须已经在跑，脚本不会自动兜底：
+#   cd /home/ubhuazhu/dev_pros && docker compose up -d ingest_dev
+#   curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8100/health   # 期望 200
+# 若网关不可用，脚本直接报错退出（不再启动 WSL 原生网关——开发环境统一走 ingest_dev）。
 # =============================================================================
 set -euo pipefail
 
@@ -44,9 +43,6 @@ TIMEOUT="${TIMEOUT:-120}"
 RERANKER="${RERANKER:-bge}"
 TAG="${TAG:-}"
 INGEST_URL="${INGEST_URL:-http://localhost:8100}"
-START_NATIVE_GATEWAY="${START_NATIVE_GATEWAY:-auto}"
-GATEWAY_DIR="${GATEWAY_DIR:-$PROJECT_DIR/../rag-ingest-gateway}"
-GATEWAY_PORT="${GATEWAY_PORT:-8101}"
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 REPORT_DIR="${EVAL_REPORT_DIR:-$PROJECT_DIR/../文档/项目/AdaptiveSearchAgent/评测报告}"
 
@@ -73,23 +69,12 @@ fi
 [ -n "$TAG" ] || TAG="$(date +%Y%m%d_%H%M%S)_${MODEL}_${RERANKER}_ollama_$(basename "$DATASET" .yaml)"
 TAGDIR="$REPORT_DIR/$TAG"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-GW_STARTED=0
 
 # ── 输出 ─────────────────────────────────────────────────────────────────────
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_cyn=$'\033[36m'; c_rst=$'\033[0m'
 log()  { printf '%s[%s]%s %s\n' "$c_cyn" "$(date +%H:%M:%S)" "$c_rst" "$*"; }
 warn() { printf '%s[WARN]%s %s\n' "$c_ylw" "$c_rst" "$*" >&2; }
 die()  { printf '%s[FAIL]%s %s\n' "$c_red" "$c_rst" "$*" >&2; exit 1; }
-
-cleanup() {
-  if [ "$GW_STARTED" = "1" ]; then
-    log "清理：停止脚本启动的原生网关 (127.0.0.1:${GATEWAY_PORT})"
-    pkill -TERM -f "uvicorn api_main:app --host 127.0.0.1 --port ${GATEWAY_PORT}" 2>/dev/null || true
-    sleep 1
-    pkill -KILL -f "uvicorn api_main:app --host 127.0.0.1 --port ${GATEWAY_PORT}" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT
 
 # ── 预检工具 ─────────────────────────────────────────────────────────────────
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1"; }
@@ -156,7 +141,6 @@ need_cmd curl
 
 case "$MODEL" in bge-m3) ;; *) die "MODEL 只能是 bge-m3（nomic-embed 已下线，当前: $MODEL）" ;; esac
 case "$RERANKER" in ms-marco|bge) ;; *) die "RERANKER 只能是 ms-marco 或 bge（当前: $RERANKER）" ;; esac
-case "$START_NATIVE_GATEWAY" in auto|always|never) ;; *) die "START_NATIVE_GATEWAY 只能是 auto/always/never" ;; esac
 
 OLLAMA_EMBED="bge-m3"
 
@@ -209,65 +193,26 @@ else
   warn "Ollama 没有模型 $OLLAMA_EMBED，先执行: ollama pull $OLLAMA_EMBED"
 fi
 
-# ── 3. 确保 RAG 子服务可用（容器网关连不上 Windows Ollama 时自动兜底）───────
-start_native_gateway() {
-  [ -d "$GATEWAY_DIR" ] || die "找不到网关目录: $GATEWAY_DIR（可用 GATEWAY_DIR 指定）"
-  [ -f "$GATEWAY_DIR/api_main.py" ] || die "网关目录缺少 api_main.py: $GATEWAY_DIR"
-  if ss -lnt 2>/dev/null | grep -q ":${GATEWAY_PORT} "; then
-    log "端口 ${GATEWAY_PORT} 已被占用，先探测它是否为可用网关..."
-    if probe_search "http://127.0.0.1:${GATEWAY_PORT}"; then
-      INGEST_URL="http://127.0.0.1:${GATEWAY_PORT}"
-      log "复用已有网关: $INGEST_URL"
-      return 0
-    fi
-    die "端口 ${GATEWAY_PORT} 被占用但不是可用 RAG 网关，请换 GATEWAY_PORT 或先释放"
-  fi
-  local gwlog="${TMPDIR:-/tmp}/ragas_gateway_${GATEWAY_PORT}.log"
-  log "启动 WSL 原生网关: $GATEWAY_DIR -> 127.0.0.1:${GATEWAY_PORT}"
-  ( cd "$GATEWAY_DIR" && \
-    setsid env OLLAMA_BASE_URL="$OLLAMA_URL" OLLAMA_EMBEDDING_MODEL=bge-m3 \
-      poetry run uvicorn api_main:app --host 127.0.0.1 --port "$GATEWAY_PORT" \
-      >"$gwlog" 2>&1 & )
-  GW_STARTED=1
-  for _ in $(seq 1 45); do
-    if curl -sf --max-time 2 "http://127.0.0.1:${GATEWAY_PORT}/health" >/dev/null 2>&1; then
-      if probe_search "http://127.0.0.1:${GATEWAY_PORT}"; then
-        INGEST_URL="http://127.0.0.1:${GATEWAY_PORT}"
-        log "原生网关就绪: $INGEST_URL"
-        return 0
-      fi
-      warn "原生网关已起，但检索仍失败，日志: $gwlog"
-      tail -20 "$gwlog" >&2 || true
-      return 1
-    fi
-    sleep 2
-  done
-  warn "原生网关启动超时，日志: $gwlog"
-  tail -30 "$gwlog" >&2 || true
-  return 1
-}
-
 mkdir -p "$TAGDIR"
 
-log "探测 RAG 子服务: $INGEST_URL ..."
+log "探测 RAG 网关: $INGEST_URL ..."
 PROBE_RC=0
 probe_search "$INGEST_URL" || PROBE_RC=$?
 if [ "$PROBE_RC" -eq 0 ]; then
-  log "RAG 子服务检索正常: $INGEST_URL"
+  log "RAG 网关检索正常: $INGEST_URL"
 else
   if [ "$PROBE_RC" -eq 3 ]; then
-    warn "RAG 子服务返回 500（常见原因：容器内 OLLAMA_BASE_URL=host.docker.internal:11434，"
-    warn "而 Ollama 跑在 Windows 上，容器到不了 127.0.0.1:11434）"
+    warn "RAG 网关返回 500（常见原因：容器内 OLLAMA_BASE_URL=host.docker.internal:11435，"
+    warn "而 ollama_relay 没起来，容器到不了宿主机的 11434）"
   fi
-  case "$START_NATIVE_GATEWAY" in
-    never)
-      die "RAG 子服务不可用（probe rc=$PROBE_RC），且 START_NATIVE_GATEWAY=never"
-      ;;
-    *)
-      warn "RAG 子服务不可用（probe rc=$PROBE_RC），尝试启动 WSL 原生网关兜底..."
-      start_native_gateway || die "原生网关也没起来；请先修好 8100 的 Ollama 连通性"
-      ;;
-  esac
+  die "RAG 网关不可用: $INGEST_URL（probe rc=$PROBE_RC）
+
+基线必须走 ingest_dev（容器里的 RAG 路由转发器）。脚本已不再自动启动
+WSL 原生网关兜底，因为开发环境统一走容器这条路。请先起容器再重跑：
+
+  cd /home/ubhuazhu/dev_pros && docker compose up -d ingest_dev
+  curl -s -o /dev/null -w '%{http_code}\\n' http://localhost:8100/health   # 期望 200
+"
 fi
 
 # ── 4. 试运行：只打印解析后的配置 ────────────────────────────────────────────
