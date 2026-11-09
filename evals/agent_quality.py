@@ -46,8 +46,9 @@ from openai import OpenAI  # noqa: E402
 from config import settings  # noqa: E402
 
 DEFAULT_DATASET = _PROJ / "evals" / "datasets" / "qa_dataset_v3.yaml"
-# 必须与 Ragas 基线报告里的 judge_model 一致，否则两次分数不可比
-DEFAULT_JUDGE_MODEL = "qwen3.8-flash"
+# 必须与 Ragas 基线报告里的 judge_model 一致，否则两次分数不可比。
+# 取自 .env 的 ALIYUN_QWEN_MODEL_NAME：换裁判只改 .env，不用改代码。
+DEFAULT_JUDGE_MODEL = settings.ALIYUN_QWEN_MODEL_NAME
 from src.utils.report_paths import eval_report_dir  # noqa: E402
 
 REPORT_DIR = eval_report_dir()

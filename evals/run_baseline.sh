@@ -9,13 +9,14 @@
 #   RERANKER=ms-marco ./evals/run_baseline.sh  # 只取 RRF，不做 BGE 精排
 #   DATASET=evals/datasets/qa_dataset_v4.yaml ./evals/run_baseline.sh  # 24 题优化版（v3 冻结）
 #   TAG=my_baseline ./evals/run_baseline.sh # 自定义归档目录名
+#   ./evals/run_baseline.sh --tag my_baseline  # 同上，作为命令行参数（推荐，不易写错）
 #
 # 常用环境变量:
 #   MODEL=bge-m3                  仅 bge-m3（nomic 已下线）
 #   DATASET=<yaml 路径>           默认 evals/datasets/qa_dataset_v3.yaml
 #   KB_ID=eval_v3                 黄金集专用库（6 篇，171 片）
 #   TOP_K=3                       默认 3；脚本对 bge 会放大到 3×TOP_K，网关 hybrid 再×3 返回
-#   MAX_WORKERS=4                 Ragas 并发
+#   MAX_WORKERS=2                 Ragas 并发（默认 2：4 并发下 RAG 偶发空检索）
 #   TIMEOUT=120                   单任务超时（秒）
 #   RERANKER=ms-marco|bge         默认 bge（BGE 精排；首次会加载 2.2G 模型）
 #   TAG=<归档名>                  默认 时间戳_model_reranker_dataset
@@ -36,7 +37,9 @@ MODEL="${MODEL:-bge-m3}"
 DATASET="${DATASET:-evals/datasets/qa_dataset_v3.yaml}"
 KB_ID="${KB_ID:-eval_v3}"
 TOP_K="${TOP_K:-3}"
-MAX_WORKERS="${MAX_WORKERS:-4}"
+# 默认 2 而不是 4：4 并发下 RAG 子服务会偶发返回空结果（空检索 1 次），
+# 而基线判据要求"空检索 0"，否则基线本身不可复现。
+MAX_WORKERS="${MAX_WORKERS:-2}"
 TIMEOUT="${TIMEOUT:-120}"
 RERANKER="${RERANKER:-bge}"
 TAG="${TAG:-}"
@@ -49,12 +52,16 @@ REPORT_DIR="${EVAL_REPORT_DIR:-$PROJECT_DIR/../文档/项目/AdaptiveSearchAgent
 
 DRY_RUN=0
 SMOKE=0
-for arg in "$@"; do
-  case "$arg" in
-    --dry-run) DRY_RUN=1 ;;
-    --smoke)   SMOKE=1 ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
-    *) echo "未知参数: $arg（可用 --dry-run / --smoke / --help）" >&2; exit 2 ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --smoke)   SMOKE=1; shift ;;
+    --tag)
+      [ $# -ge 2 ] || { echo "--tag 需要一个名字，如 --tag baseline_v2" >&2; exit 2; }
+      TAG="$2"; shift 2 ;;
+    --tag=*) TAG="${1#*=}"; shift ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    *) echo "未知参数: $1（可用 --dry-run / --smoke / --tag <名字> / --help）" >&2; exit 2 ;;
   esac
 done
 
@@ -349,6 +356,7 @@ TOP_K         : $TOP_K（候选 retrieval_top_k=$RETRIEVAL_K，网关最多 3×=
 生成 LLM      : 本地 $(env_val OLLAMA_MODEL_NAME)
 项目 Agent LLM: $(env_val OLLAMA_MODEL_NAME)
 RAG 子服务    : $INGEST_URL
+并发 workers  : $MAX_WORKERS
 报告前缀      : ragas_evaluation_${SUFFIX}
 EOF
 

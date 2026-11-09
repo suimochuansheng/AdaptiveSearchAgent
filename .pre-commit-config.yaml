@@ -16,4 +16,5 @@ repos:
           'types-requests',
           'types-redis',         # 👈 添加这一行，这是解决方案的核心
           'types-python-dateutil',
+          'types-PyYAML',
         ]
