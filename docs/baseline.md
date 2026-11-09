@@ -3,6 +3,11 @@
 > 生成时间：2026-11-08 23:52（Asia/Shanghai）
 > 分支：`card/T0-1`（基于 `d51650b`）
 > 用途：后续所有改造的回归对比基准。只修环境、不动业务逻辑。
+>
+> **更新记录**
+> - 2026-11-09：裁判 `qwen3.8-flash` 额度到期，换成 `qwen3.8-max-0902` 并重跑基线；
+>   同时移除评测脚本里的 WSL 原生网关兜底，RAG 统一走 `ingest_dev` 容器（8100）。
+>   → **第 4 节的数字与旧 flash 版本不可横比，旧的已作废。**
 
 ---
 
@@ -49,22 +54,33 @@
 ## 4. Ragas 检索层基线（20 题黄金集）
 
 配置：`evals/datasets/qa_dataset_v3.yaml`（sha256 `367f35c1ec11…`）、`kb_id=eval_v3`、
-embedding `bge-m3`、reranker `bge`、生成 `qwen35-9b-official`、裁判 `qwen3.8-flash`、
-top_k=3、workers=4。
+embedding `bge-m3`、reranker `bge`、生成 `qwen35-9b-official`、裁判 **`qwen3.8-max-0902`**、
+top_k=3、workers=**2**、RAG 网关 **`http://localhost:8100`（ingest_dev 容器）**。
 
-| 指标 | mean | median | min | max |
-|---|---|---|---|---|
-| context_recall | **1.0000** | 1.0000 | 1.0 | 1.0 |
-| faithfulness | **0.9205** | 1.0000 | 0.0 | 1.0 |
-| answer_relevancy | **0.8983** | 0.9260 | — | — |
+| 指标 | mean | median | min |
+|---|---|---|---|
+| context_recall | **1.0000** | 1.0000 | 1.0 |
+| faithfulness | **0.8030** | 1.0000 | 0.0 |
+| answer_relevancy | **0.8339** | 0.8412 | 0.6204 |
 
-- 检索空结果：**0 次**；生成降级：0 次；
+- 检索空结果：**0 次**；生成降级：**0 次**；
 - 归因参考：hit@1 **95%**、hit@3 **100%**、hit@3（精排后）**100%**；
 - 上下文切片：min/max/avg = 3/3/3；
-- 耗时：检索 275.1s + 评估 448.7s = **723.8s**；
-- 报告路径：`文档/项目/AdaptiveSearchAgent/评测报告/ragas_evaluation_bge-m3_bge_ollama.json`。
+- 耗时：检索 212.5s + 评估 467.1s = **679.6s**；
+- 被测 commit：`5893a2a`（dirty files: 0）；
+- 报告目录：`文档/项目/AdaptiveSearchAgent/评测报告/baseline_8100/`
+  （`run_meta.txt` 记录了裁判/网关/并发，可核对）。
 
-**回归判定**：三项均值下降 > 0.02 视为退化（先排除数据/环境差异，再看代码）。
+**回归判定**
+
+- `context_recall` 必须保持 **1.0**（检索掉链子会直接反映在这里）；
+- `faithfulness` 优先看**中位数（当前 1.0）与 0 分题数（当前 3 题）**，均值只作参考：
+  实测 0 分题多来自裁判输出截断（`IncompleteOutputException`），单题塌陷就能让均值掉 ~0.05，
+  比指标本身的波动还大；
+- `answer_relevancy` 均值下降 **> 0.04** 再判退化（同环境下两次跑的实测差约 0.02）。
+
+> 追查 0 分题时先看 `run.log` 有没有 `IncompleteOutputException`——那是裁判问题，不是系统变差。
+> 旧 flash 基线（faith 0.9205 / relevancy 0.8983）已作废，仅作历史记录，**不要拿来对比**。
 
 ## 5. 固定环境信息
 
@@ -72,9 +88,10 @@ top_k=3、workers=4。
 |---|---|
 | Python | 3.11.15 |
 | 虚拟环境 | `/home/ubhuazhu/.cache/pypoetry/virtualenvs/adsearchagent-w97WTAdM-py3.11` |
-| RAG 服务 | `dev_pros-ingest_dev-1`，8100 端口，healthy |
+| RAG 服务 | `dev_pros-ingest_dev-1`（容器），8100 端口，healthy；**基线只认这条路径**——评测脚本已移除 WSL 原生网关兜底，8100 不可用时直接报错 |
 | Redis / Postgres | `redis_cache` / `postgres_dev`，healthy |
 | Ollama | `qwen35-9b-official:latest`（11434） |
+| 裁判 | `qwen3.8-max-0902`（阿里云百炼，`.env` 的 `ALIYUN_QWEN_MODEL_NAME`） |
 
 ## 6. 复跑命令（照抄）
 
@@ -85,6 +102,11 @@ eval $(poetry env activate)
 pytest -q                      # 期望 223 passed, 4 skipped, 4 deselected
 pytest --collect-only -q       # 期望 227/231 collected
 
-# Ragas（约 12 分钟）
-poetry run python evals/rag_quality.py --model bge-m3
+# Ragas（约 11 分钟）
+# 前置：RAG 网关必须在跑，否则脚本直接失败（不再兜底）
+cd /home/ubhuazhu/dev_pros && docker compose up -d ingest_dev
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8100/health   # 期望 200
+
+cd /home/ubhuazhu/dev_pros/AdaptiveSearchAgent
+./evals/run_baseline.sh --tag baseline_check
 ```
