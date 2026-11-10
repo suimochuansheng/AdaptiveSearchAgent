@@ -629,12 +629,17 @@ async def _decide_approval(interrupt_data: dict, decisions: dict[str, str | None
 
 
 def _build_resume_body(interrupt_data: dict, decision: str) -> dict:
-    """构造恢复请求体；request_id 每次都用新的 uuid4（防重放）。"""
+    """构造恢复请求体：三字段（approval_id / decision / request_id）。
+
+    - `approval_id`：服务端签发的一次性凭证（32 hex），前端只回传，不生成；
+    - `request_id`：每次都用新的 uuid4（客户端幂等键，服务端 24h 去重，防重放）；
+    - 2026-11-11 裁决（OI-TDM-003）：删除 `token` 字段，只保留三字段。
+      契约见 `docs/contracts/resume-http.md`。
+    """
     return {
         "approval_id": str(interrupt_data.get("approval_id") or ""),
         "decision": decision,
         "request_id": str(uuid.uuid4()),
-        "token": str(interrupt_data.get("token") or ""),
     }
 
 

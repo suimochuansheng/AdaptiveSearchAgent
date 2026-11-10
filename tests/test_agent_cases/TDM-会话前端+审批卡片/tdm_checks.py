@@ -10,7 +10,8 @@
 
 存在原因：
   开发窗口自带的 10 条自检只证明"开发者自己写的行为"，其中两条还把缺陷写成了期望
-  （user_id=None、resume.token=""）。本脚本由测试窗口独立重写：用进程内假 Chainlit
+  （user_id=None、resume 体含 token；后者已由 2026-11-11 裁决删除，见 OI-TDM-003）。
+  本脚本由测试窗口独立重写：用进程内假 Chainlit
   对象 + 假 SSE 流，逐条对照车道包第 2/3 节冻结契约与验收卡 A/B/C，不依赖真模型、
   不依赖后端端口、不出网。
 
@@ -434,7 +435,7 @@ def check_a5_approval_card() -> str:
 
 
 def check_a6_approve_resume() -> str:
-    """同意 → 发 resume；body 含 approval_id/decision/request_id(uuid4)/token。"""
+    """同意 -> 发 resume；body 恰为三字段 approval_id/decision/request_id(uuid4)，不含 token。"""
     _reset()
     app.cl.user_session = FakeUserSession(
         {app.SESSION_THREAD_ID: "tid-6", app.SESSION_USER_NAME: "developer"}
@@ -454,15 +455,16 @@ def check_a6_approve_resume() -> str:
         f"resume URL 错误: {resume['url']}"
     )
     body = resume["json"]
-    assert set(body) == {"approval_id", "decision", "request_id", "token"}, f"字段不全: {body!r}"
+    # 2026-11-11 裁决（OI-TDM-003）：三字段；token 已删，出现即 FAIL
+    assert set(body) == {"approval_id", "decision", "request_id"}, f"字段不对: {body!r}"
+    assert "token" not in body, f"不应含 token 字段: {body!r}"
+    assert "token" not in INTERRUPT_DATA, f"中断帧不应含 token: {INTERRUPT_DATA!r}"
     assert body["approval_id"] == "apr_demo_001", f"approval_id 错误: {body!r}"
     assert body["decision"] == "approve", f"decision 错误: {body!r}"
     assert uuid.UUID(body["request_id"]).version == 4, f"request_id 不是 uuid4: {body!r}"
-    assert "token" in body, "缺 token 字段"
-    assert isinstance(body["token"], str), f"token 不是 str: {body['token']!r}"
     return (
-        "POST /chat/conversation/tid-6/resume；四字段齐全；request_id="
-        f"{body['request_id']}（v4）；token={body['token']!r}（契约无来源，见 OI-TDM-003）"
+        "POST /chat/conversation/tid-6/resume；三字段齐全（approval_id/decision/request_id）；"
+        f"request_id={body['request_id']}（v4）；不含 token（OI-TDM-003 已裁决）"
     )
 
 
@@ -576,8 +578,11 @@ def _top_level_defs(src: str) -> dict[str, str]:
     }
 
 
-# 模式分流必须改写的入口，其余旧定义一律不允许变动
-_ALLOWED_CHANGED_DEFS = {"on_chat_start", "on_message"}
+# 必须改写的入口，其余旧定义一律不允许变动
+# - on_chat_start / on_message：模式分流（G9）
+# - _build_resume_body：0a 三字段裁决（2026-11-11，OI-TDM-003）必须删 token，
+#   它属审批链路、不属旧 /chat/stream 流程；除它之外旧流程仍逐 AST 冻结。
+_ALLOWED_CHANGED_DEFS = {"on_chat_start", "on_message", "_build_resume_body"}
 
 
 def check_b2_old_flow_untouched() -> str:
@@ -586,7 +591,9 @@ def check_b2_old_flow_untouched() -> str:
     口径说明：
     - squash 合入后拿不到单独的「修复提交」，只能拿最后一次改到该文件的提交；
     - 行级 numstat 会被格式化误伤（相邻 f-string 拆行也算删除），故改比 AST；
-    - 合入必然改写 on_chat_start / on_message 来做模式分流，这两个入口列入允许改写集合。
+    - 合入必然改写 on_chat_start / on_message 来做模式分流，这两个入口列入允许改写集合；
+    - 0a（2026-11-11 裁决 OI-TDM-003）必然改写 _build_resume_body 删 token，
+      该函数属审批链路，同样列入允许改写集合（旧 /chat/stream 流程仍逐 AST 冻结）。
     """
     rev = _git("log", "-1", "--format=%H", "--", "frontend/app.py")
     assert rev, "frontend/app.py 没有提交记录，无法判断"
