@@ -64,7 +64,8 @@ dev = [
     "datasets (>=5.0.0,<6.0.0)",
     "langchain-google-vertexai (>=3.2.4,<4.0.0)",
     "pytest-cov (>=7.1.0,<8.0.0)",
-    "types-pyyaml (>=6.0.12.20261103,<7.0.0.0)"
+    "types-pyyaml (>=6.0.12.20261103,<7.0.0.0)",
+    "import-linter (>=2.6,<2.7)"
 ]
 
 [tool.ruff]
@@ -103,3 +104,52 @@ exclude = [
 [tool.poetry.scripts] # 定义命令行脚本
 # 只需要运行 poetry run api 就能启动服务器
 api = "uvicorn api_main:app --reload --port 8000"
+
+[tool.importlinter]
+root_package = "agent"
+include_external_packages = true
+
+# 1) domain / app 不得依赖框架（langchain / langgraph 全家）
+[[tool.importlinter.contracts]]
+name = "core-no-framework"
+type = "forbidden"
+source_modules = ["agent.domain", "agent.app"]
+forbidden_modules = [
+    "langchain",
+    "langchain_classic",
+    "langchain_community",
+    "langchain_core",
+    "langchain_deepseek",
+    "langchain_google_vertexai",
+    "langchain_ollama",
+    "langchain_openai",
+    "langchain_protocol",
+    "langchain_text_splitters",
+    "langgraph",
+    "langgraph_api",
+    "langgraph_checkpoint",
+    "langgraph_checkpoint_postgres",
+    "langgraph_cli",
+    "langgraph_prebuilt",
+    "langgraph_runtime_inmem",
+    "langgraph_sdk",
+]
+
+# 2) app 不得依赖 adapters（只能依赖自身 ports 抽象）
+[[tool.importlinter.contracts]]
+name = "app-independent"
+type = "forbidden"
+source_modules = ["agent.app"]
+forbidden_modules = ["agent.adapters"]
+
+# 3) adapters 不得依赖 app 的具体实现，唯一例外是 app.ports
+[[tool.importlinter.contracts]]
+name = "adapters-only-ports"
+type = "forbidden"
+source_modules = ["agent.adapters"]
+forbidden_modules = ["agent.app"]
+ignore_imports = ["agent.adapters.** -> agent.app.ports"]
+unmatched_ignore_imports_alerting = "warn"
+
+# 组合根规则（只有 main.py 可同时 import app 与 adapters）暂不启用：
+# main.py 在 T2-2 才出现，见 docs/architecture.md「待启用规则」。
