@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -565,20 +566,48 @@ def check_b1b_forbidden_clean() -> str:
     return "config.py / pyproject.toml 无 diff"
 
 
-def check_b2_old_flow_untouched() -> str:
-    """旧流程零改动：frontend/app.py 只新增、无删除行。
+def _top_level_defs(src: str) -> dict[str, str]:
+    """顶层函数/类的 AST 摘要，用于判断「旧定义是否被改写」。"""
+    tree = ast.parse(src)
+    return {
+        node.name: ast.dump(node)
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
 
-    口径取「最后一次改到 frontend/app.py 的提交」，而不是工作区 diff：改动一旦提交，
-    git diff 就为空，按工作区比较会把已完成的修复误判成「无法判断」。
+
+# 模式分流必须改写的入口，其余旧定义一律不允许变动
+_ALLOWED_CHANGED_DEFS = {"on_chat_start", "on_message"}
+
+
+def check_b2_old_flow_untouched() -> str:
+    """旧流程零改动：除模式分流入口外，frontend/app.py 既有定义在 AST 层面未变。
+
+    口径说明：
+    - squash 合入后拿不到单独的「修复提交」，只能拿最后一次改到该文件的提交；
+    - 行级 numstat 会被格式化误伤（相邻 f-string 拆行也算删除），故改比 AST；
+    - 合入必然改写 on_chat_start / on_message 来做模式分流，这两个入口列入允许改写集合。
     """
     rev = _git("log", "-1", "--format=%H", "--", "frontend/app.py")
     assert rev, "frontend/app.py 没有提交记录，无法判断"
-    numstat = _git("show", "--numstat", "--format=", rev, "--", "frontend/app.py")
-    assert numstat, f"提交 {rev[:7]} 未改到 frontend/app.py，无法判断"
-    added, deleted = numstat.split()[:2]
-    assert int(deleted) == 0, f"旧代码被删除/改写: -{deleted} 行"
-    assert int(added) > 0, "没有新增代码"
-    return f"frontend/app.py +{added}/-{deleted}（纯新增，旧 _stream_agent 未改；提交 {rev[:7]}）"
+    old_src = _git("show", f"{rev}^:frontend/app.py")
+    assert old_src, f"取不到 {rev[:7]}^:frontend/app.py，无法判断"
+    new_src = (REPO_ROOT / "frontend/app.py").read_text(encoding="utf-8")
+    old_defs = _top_level_defs(old_src)
+    new_defs = _top_level_defs(new_src)
+    assert old_defs, "旧版本里没有可对比的顶层定义"
+    missing = sorted(set(old_defs) - set(new_defs))
+    assert not missing, f"旧定义被删除: {missing}"
+    changed = sorted(
+        name
+        for name, dump in old_defs.items()
+        if new_defs.get(name) != dump and name not in _ALLOWED_CHANGED_DEFS
+    )
+    assert not changed, f"旧定义被改写: {changed}"
+    return (
+        f"frontend/app.py 旧 {len(old_defs)} 个顶层定义 AST 未变"
+        f"（允许改写: {', '.join(sorted(_ALLOWED_CHANGED_DEFS))}；提交 {rev[:7]}）"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
