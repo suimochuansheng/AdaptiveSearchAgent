@@ -7,10 +7,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from langgraph.graph.state import CompiledStateGraph
 
 from config import settings
 from src.tools.calculator import calculate_math
@@ -37,7 +44,7 @@ async def calculator(expression: str) -> str:
 
 # ── 工具列表 ──────────────────────────────────────────────────
 
-TOOLS = [search_knowledge, search_tavily, calculator]
+TOOLS: list[Callable[..., Any]] = [search_knowledge, search_tavily, calculator]
 
 # ── System Prompt ──────────────────────────────────────────────
 
@@ -54,7 +61,7 @@ calculator(expression): 计算数学表达式（如 "2 + 3 * sin(0.5)"）
 - 复杂问题可组合调用多个工具"""
 
 
-def build_dynamic_tool_graph() -> StateGraph:
+def build_dynamic_tool_graph() -> CompiledStateGraph:
     """构建并返回绑定了 3 个工具的 LangGraph 状态图。
 
     Returns:
@@ -92,7 +99,7 @@ def build_dynamic_tool_graph() -> StateGraph:
     logger.info(
         "Dynamic tool graph built",
         extra={
-            "tools": [t.__name__ for t in TOOLS],
+            "tools": [getattr(t, "__name__", "?") for t in TOOLS],
             "model": settings.ollama_model_name,
         },
     )

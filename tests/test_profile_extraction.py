@@ -108,7 +108,7 @@ async def test_extract_failure_is_silent() -> None:
     """模型挂了：不写库、不抛异常（抽取是增强，不是依赖）。"""
     store = _FakeStore()
 
-    async def _boom(_prompt: str) -> str:
+    async def _boom(prompt: str) -> str:
         raise RuntimeError("model down")
 
     payload = await extract_and_store(

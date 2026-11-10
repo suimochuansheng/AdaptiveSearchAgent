@@ -24,8 +24,8 @@ async def search_worker(state: dict) -> dict:
     rag_task = search_knowledge(keyword, top_k=3, kb_id=kb_id, model="bge-m3")
     web_task = search_tavily(keyword)
 
-    rag_result: str | Exception
-    web_result: str | Exception
+    rag_result: str | BaseException
+    web_result: str | BaseException
     rag_result, web_result = await asyncio.gather(
         rag_task,
         web_task,
@@ -34,9 +34,9 @@ async def search_worker(state: dict) -> dict:
 
     # 合并结果
     parts: list[str] = []
-    if rag_result and not isinstance(rag_result, Exception):
+    if isinstance(rag_result, str) and rag_result:
         parts.append(f"[本地知识库]\n{rag_result[:800]}")
-    if web_result and not isinstance(web_result, Exception):
+    if isinstance(web_result, str) and web_result:
         parts.append(f"[在线搜索]\n{web_result[:800]}")
 
     content = "\n\n".join(parts) if parts else f"未找到关于 '{keyword}' 的相关信息"

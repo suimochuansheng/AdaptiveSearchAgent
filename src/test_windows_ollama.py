@@ -1,12 +1,14 @@
 import json
+from typing import Any
 
 from openai import OpenAI
+from openai.types.chat import ChatCompletionToolParam
 
 MODEL = "qwen35-9b-official"  # ← 在函数外定义
 
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
 
-tools = [
+tools: list[ChatCompletionToolParam] = [
     {
         "type": "function",
         "function": {
@@ -44,13 +46,14 @@ for q in questions:
     )
     msg = resp.choices[0].message
     if msg.tool_calls:
+        call: Any = msg.tool_calls[0]
         try:
-            args = json.loads(msg.tool_calls[0].function.arguments)
+            args = json.loads(call.function.arguments)
             ok += 1
             print(f"[OK]   {q} -> {args}")
         except json.JSONDecodeError:
             bad_json += 1
-            print(f"[BAD]  {q} -> {msg.tool_calls[0].function.arguments!r}")
+            print(f"[BAD]  {q} -> {call.function.arguments!r}")
     else:
         no_call += 1
         print(f"[NONE] {q} -> {msg.content!r}")

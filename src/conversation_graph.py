@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import (
@@ -38,6 +38,8 @@ from src.tools.search import search_tavily
 from src.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
     from src.state import AgentState
@@ -136,7 +138,13 @@ async def _run_deep_research(query: str) -> str:
 
 
 # ── 工具列表：模型每轮只能从这 4 个工具里选 ──────────────────────────────
-TOOLS = [search_knowledge, search_tavily, calculator, deep_research, read_offload]
+TOOLS: list[Callable[..., Any]] = [
+    search_knowledge,
+    search_tavily,
+    calculator,
+    deep_research,
+    read_offload,
+]
 
 # ── System Prompt（稳定区：角色 + 工具索引 + 判断规则，阶段 B 会做预算管理）──
 SYSTEM_PROMPT = """你是内部知识助手，可以自主选择工具完成任务：

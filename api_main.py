@@ -57,13 +57,13 @@ if settings.SENTRY_DSN:
     logger.info("✅ Sentry 已启用 (environment=%s)", settings.ENV)
 
 # Langfuse 可观测性（仅当启用且密钥非空时初始化）
+langfuse_handler: Any = None
 if settings.LANGFUSE_ENABLED and settings.LANGFUSE_PUBLIC_KEY:
     from langfuse.langchain import CallbackHandler
 
     langfuse_handler = CallbackHandler()
     logger.info("✅ Langfuse 追踪已启用 (host=%s)", settings.LANGFUSE_HOST)
 else:
-    langfuse_handler = None
     logger.warning("⚠️ Langfuse 未启用 (检查 LANGFUSE_ENABLED 和 LANGFUSE_PUBLIC_KEY)")
 
 # 导入公共图工厂和状态
