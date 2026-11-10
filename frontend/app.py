@@ -31,6 +31,16 @@ DEVELOPER_MODE = True
 # ── 会话键名常量 ─────────────────────────────────────────────
 SESSION_THREAD_ID = "thread_id"
 SESSION_USER_NAME = "user_name"
+SESSION_MODE = "chat_mode"
+
+# ── 对话模式（默认 deep_research，旧流程零变化）────────────────
+MODE_DEEP_RESEARCH = "deep_research"
+MODE_CONVERSATION = "conversation"
+DEFAULT_CHAT_MODE = MODE_DEEP_RESEARCH
+CONVERSATION_ENDPOINT = "/chat/conversation"
+APPROVAL_TIMEOUT_SECONDS = 120
+APPROVAL_ACTION_APPROVE = "approve"
+APPROVAL_ACTION_REJECT = "reject"
 
 # ── 步骤名称 ─────────────────────────────────────────────────
 THINKING_STEP_NAME = "思考过程"
@@ -314,7 +324,7 @@ async def _ask_cost_confirm(interrupt_data: dict) -> str | None:
     message = interrupt_data.get("message", "")
 
     content = message or (
-        f"本次需要搜索 {keyword_count} 个关键词，" f"预计消耗约 {estimated_cost} 元，是否继续？"
+        f"本次需要搜索 {keyword_count} 个关键词，预计消耗约 {estimated_cost} 元，是否继续？"
     )
     await cl.Message(content=f"🛑 **高成本搜索确认**\n\n{content}").send()
 
@@ -341,6 +351,423 @@ async def _ask_cost_confirm(interrupt_data: dict) -> str | None:
         value = res.get("value")
 
     return str(value).strip() if value else None
+
+
+# ═══════════════════════════════════════════════════════════════
+# 对话模式（/chat/conversation）— 模式开关 / 流式渲染 / 审批卡片
+# ═══════════════════════════════════════════════════════════════
+
+
+def _current_mode() -> str:
+    """返回当前对话模式；未设置或取值非法时一律回落到 deep_research。"""
+    try:
+        mode = cl.user_session.get(SESSION_MODE)
+    except Exception:  # noqa: BLE001 —— 脱离 Chainlit 运行时（脚本/单测）时按默认模式
+        mode = None
+    return mode if mode in (MODE_DEEP_RESEARCH, MODE_CONVERSATION) else DEFAULT_CHAT_MODE
+
+
+def _select_widget_cls() -> type:
+    """取 Chainlit 的 Select 组件类（2.x 在 cl.input_widget，旧版在 cl.Select）。"""
+    try:
+        return cl.input_widget.Select  # type: ignore[attr-defined]
+    except (AttributeError, KeyError):
+        return cl.Select  # type: ignore[attr-defined]
+
+
+def _make_chat_settings() -> cl.ChatSettings:
+    """构造模式开关（默认 deep_research）。"""
+    return cl.ChatSettings(
+        inputs=[
+            _select_widget_cls()(
+                id=SESSION_MODE,
+                label="对话模式",
+                values=[MODE_DEEP_RESEARCH, MODE_CONVERSATION],
+                initial_value=DEFAULT_CHAT_MODE,
+                description=(
+                    "deep_research = 深度调研（默认，/chat/stream）；"
+                    "conversation = 会话式 Agent（/chat/conversation，含审批卡片）"
+                ),
+            )
+        ]
+    )
+
+
+@cl.on_settings_update
+async def on_settings_update(settings: dict) -> None:
+    """用户切换模式时写入会话；默认值始终是 deep_research，旧流程不受影响。"""
+    mode = str(settings.get(SESSION_MODE) or DEFAULT_CHAT_MODE)
+    if mode not in (MODE_DEEP_RESEARCH, MODE_CONVERSATION):
+        mode = DEFAULT_CHAT_MODE
+    cl.user_session.set(SESSION_MODE, mode)
+    logger.info("对话模式切换: %s", mode)
+
+
+def _tool_names(event: dict) -> list[str]:
+    """从 tool_call 帧中取出工具名列表（容错：结构异常时返回空列表）。"""
+    names: list[str] = []
+    tools = event.get("tools")
+    if isinstance(tools, list):
+        for item in tools:
+            if isinstance(item, dict) and item.get("name"):
+                names.append(str(item["name"]))
+    if not names and event.get("tool"):
+        names.append(str(event["tool"]))
+    return names
+
+
+def _format_error_bubble(message: str) -> str:
+    """错误气泡文本（❌ 前缀，与旧端点 /chat/stream 的呈现保持一致）。"""
+    return f"❌ **执行出错**\n\n{message or '未知错误'}"
+
+
+async def _write_error(message: str, output_msg: cl.Message | None) -> cl.Message:
+    """把可读错误写进主消息；没有主消息时新建并发送一个错误气泡。"""
+    text = _format_error_bubble(message)
+    if output_msg is None:
+        bubble = cl.Message(content=text)
+        await bubble.send()
+        return bubble
+    existing = getattr(output_msg, "content", "") or ""
+    output_msg.content = f"{existing}\n\n{text}" if existing else text
+    await output_msg.update()
+    return output_msg
+
+
+async def _consume_conversation_frames(  # noqa: C901
+    response: httpx.Response,
+    output_msg: cl.Message | None,
+    step: cl.Step | None,
+) -> tuple[dict | None, cl.Message | None, cl.Step | None]:
+    """消费会话端点 SSE 帧（token/tool_call/ping/error/final/interrupt）。
+
+    - token：惰性创建主消息并 stream_token（增量渲染）
+    - tool_call：写入「思考过程」Step（惰性创建）
+    - ping：心跳，直接忽略（不打断渲染、不刷屏）
+    - error：可读错误气泡，结束本次流
+    - final：去重收尾 —— 流过 token 只 update()；一个 token 都没有才写 content
+    - interrupt：返回 data 交给审批卡片
+    - 未知 type：静默忽略，绝不抛 KeyError
+
+    Returns:
+        (中断数据或 None, 主消息, 思考 Step)
+    """
+    owns_step = step is None
+    streamed = False
+
+    async for line in response.aiter_lines():
+        if not line.startswith("data: "):
+            continue
+        try:
+            event = json.loads(line[6:])
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("会话流无效 JSON 行: %s", line)
+            continue
+        if not isinstance(event, dict):
+            continue
+
+        event_type = event.get("type", "")
+
+        if event_type == "token":
+            content = event.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            if output_msg is None:
+                # 不预先 send 空消息：首个 stream_token 会触发消息创建
+                output_msg = cl.Message(content="")
+            await output_msg.stream_token(content)
+            streamed = True
+            continue
+
+        if event_type == "tool_call":
+            names = _tool_names(event)
+            if not names:
+                continue
+            if step is None:
+                step = cl.Step(name=THINKING_STEP_NAME, type="run")
+                await step.send()
+                owns_step = True
+            await step.stream_token(f"\n🔧 调用工具: {', '.join(names)}\n")
+            continue
+
+        if event_type == "ping":
+            continue
+
+        if event_type == "interrupt":
+            if step is not None and owns_step:
+                await step.update()
+            if output_msg is not None:
+                await output_msg.update()
+            data = event.get("data")
+            return (data if isinstance(data, dict) else {}), output_msg, step
+
+        if event_type == "final":
+            answer = event.get("content")
+            answer = answer if isinstance(answer, str) else ""
+            if output_msg is None:
+                # 一个 token 都没收到（模型直接返回整段）：才把 content 写进消息
+                if answer:
+                    output_msg = cl.Message(content=answer)
+                    await output_msg.send()
+            else:
+                # 已经流过 token：只收尾，绝不重复输出整段回答
+                if not streamed and answer:
+                    output_msg.content = answer
+                await output_msg.update()
+            if step is not None and owns_step:
+                await step.update()
+            return None, output_msg, step
+
+        if event_type == "error":
+            output_msg = await _write_error(str(event.get("message") or "未知错误"), output_msg)
+            if step is not None and owns_step:
+                await step.update()
+            return None, output_msg, step
+
+        # 未知事件类型：静默忽略
+        logger.debug("忽略未知会话事件: %s", event_type)
+
+    if step is not None and owns_step:
+        await step.update()
+    if output_msg is not None:
+        await output_msg.update()
+    return None, output_msg, step
+
+
+async def _stream_conversation(
+    *,
+    thread_id: str,
+    message: str,
+    client: httpx.AsyncClient,
+    user_id: str | None = None,
+    output_msg: cl.Message | None = None,
+    step: cl.Step | None = None,
+) -> tuple[dict | None, cl.Message | None, cl.Step | None]:
+    """POST /chat/conversation，渲染五类 SSE 帧。
+
+    Returns:
+        (中断数据或 None, 主消息, 思考 Step)；中断数据非空时由调用方弹审批卡片。
+    """
+    payload = {"thread_id": thread_id, "message": message, "user_id": user_id or thread_id}
+    async with client.stream(
+        "POST",
+        f"{FASTAPI_BASE_URL}{CONVERSATION_ENDPOINT}",
+        json=payload,
+    ) as response:
+        response.raise_for_status()
+        return await _consume_conversation_frames(response, output_msg, step)
+
+
+def _format_money(value: object) -> str:
+    """金额格式化（容错：非数字原样展示）。"""
+    try:
+        return f"{float(value):.2f} 元"  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return f"{value} 元" if value not in (None, "") else "未知"
+
+
+def _format_approval_card(interrupt_data: dict) -> str:
+    """审批卡片正文：工具名 / 参数摘要 / 预估成本 / 剩余预算 / 到期时间。"""
+    return (
+        "### 🛡️ 审批请求\n\n"
+        f"- **工具名**：`{interrupt_data.get('tool') or '未知工具'}`\n"
+        f"- **参数摘要**：`{interrupt_data.get('args_digest') or '（无）'}`\n"
+        f"- **预估成本**：{_format_money(interrupt_data.get('cost_estimate', 0))}\n"
+        f"- **剩余预算**：{_format_money(interrupt_data.get('budget_remaining', 0))}\n"
+        f"- **到期时间**：{interrupt_data.get('expires_at') or '未知'}\n"
+    )
+
+
+async def _ask_approval(interrupt_data: dict) -> str | None:
+    """展示审批卡片并等待用户点击。
+
+    复用 `_ask_cost_confirm` 的交互范式（AskActionMessage + payload.value 2.x/1.x 兼容）。
+    Returns:
+        "approve" / "reject"；超时或无响应返回 None（调用方按 reject 处理）。
+        **不支持「记住选择」**，避免隐式放行。
+    """
+    await cl.Message(content=_format_approval_card(interrupt_data)).send()
+
+    res = await cl.AskActionMessage(
+        content=f"是否授权本次执行？（{APPROVAL_TIMEOUT_SECONDS} 秒未响应将自动拒绝）",
+        actions=[
+            cl.Action(
+                name="approve",
+                payload={"value": APPROVAL_ACTION_APPROVE},
+                label="✅ 同意执行",
+            ),
+            cl.Action(
+                name="reject",
+                payload={"value": APPROVAL_ACTION_REJECT},
+                label="❌ 拒绝",
+            ),
+        ],
+        timeout=APPROVAL_TIMEOUT_SECONDS,
+    ).send()
+
+    if not res:
+        return None
+
+    payload = res.get("payload") or {}
+    value = payload.get("value")
+    # 兼容旧版 Chainlit（1.x 曾把 value 直接放在顶层）
+    if value is None:
+        value = res.get("value")
+
+    return str(value).strip() if value else None
+
+
+async def _decide_approval(interrupt_data: dict, decisions: dict[str, str | None]) -> str | None:
+    """同一 approval_id 只问一次；重复帧复用上次决定，不再发卡片。"""
+    approval_id = str(interrupt_data.get("approval_id") or "")
+    if approval_id and approval_id in decisions:
+        return decisions[approval_id]
+    decision = await _ask_approval(interrupt_data)
+    if approval_id:
+        decisions[approval_id] = decision
+    return decision
+
+
+def _build_resume_body(interrupt_data: dict, decision: str) -> dict:
+    """构造恢复请求体；request_id 每次都用新的 uuid4（防重放）。"""
+    return {
+        "approval_id": str(interrupt_data.get("approval_id") or ""),
+        "decision": decision,
+        "request_id": str(uuid.uuid4()),
+        "token": str(interrupt_data.get("token") or ""),
+    }
+
+
+RESUME_DISABLED_MESSAGE = (
+    "⚠️ **审批功能未启用（等待 T9-2）**\n\n"
+    "后端尚未提供审批恢复接口，本次审批不会执行，界面可继续使用。"
+)
+
+
+async def _resume_conversation(
+    *,
+    thread_id: str,
+    interrupt_data: dict,
+    decision: str,
+    client: httpx.AsyncClient,
+    output_msg: cl.Message | None = None,
+    step: cl.Step | None = None,
+) -> tuple[str, dict | None, cl.Message | None, cl.Step | None]:
+    """POST /chat/conversation/{thread_id}/resume，并按 200 的 SSE 继续渲染。
+
+    Returns:
+        (状态, 下一次中断数据, 主消息, 思考 Step)。
+        状态取值：resumed / unavailable / conflict / expired；
+        404/405（后端路由未实现）只提示、不抛异常、不卡界面。
+    """
+    body = _build_resume_body(interrupt_data, decision)
+    url = f"{FASTAPI_BASE_URL}{CONVERSATION_ENDPOINT}/{thread_id}/resume"
+
+    async with client.stream("POST", url, json=body) as response:
+        status = response.status_code
+        if status in (404, 405):
+            await cl.Message(content=RESUME_DISABLED_MESSAGE).send()
+            return "unavailable", None, output_msg, step
+        if status == 409:
+            await cl.Message(content="⚠️ 该审批已被处理或重复提交（409），请重新发起。").send()
+            return "conflict", None, output_msg, step
+        if status == 410:
+            await cl.Message(content="⏰ 审批已过期（410），请重新发起。").send()
+            return "expired", None, output_msg, step
+
+        response.raise_for_status()
+        next_interrupt, output_msg, step = await _consume_conversation_frames(
+            response, output_msg, step
+        )
+        return "resumed", next_interrupt, output_msg, step
+
+
+def _register_approval(interrupt_data: dict, shown: set[str]) -> bool:
+    """登记已展示的 approval_id：首次返回 True；重复帧记日志后返回 False。
+
+    幂等护栏：同一 approval_id 只允许渲染一张卡片，重复帧（服务端重放/重连）
+    直接忽略，既不重复弹卡，也不重复调用 resume。
+    """
+    approval_id = str(interrupt_data.get("approval_id") or "")
+    if not approval_id:
+        # 没有 approval_id 的帧无法去重，按首次处理
+        return True
+    if approval_id in shown:
+        logger.info("忽略重复审批帧: approval_id=%s", approval_id)
+        return False
+    shown.add(approval_id)
+    return True
+
+
+async def _on_conversation_message(message: cl.Message) -> None:
+    """conversation 模式的消息入口：流式渲染 → 审批卡片 → 恢复（若后端支持）。"""
+    thread_id = cl.user_session.get(SESSION_THREAD_ID)
+    if not thread_id:
+        await cl.Message(content="❌ 会话未初始化，请刷新页面。").send()
+        return
+
+    user_id = cl.user_session.get(SESSION_USER_NAME) or None
+    # 契约要求 user_id 非空：会话里没有用户名时也回退成 thread_id，
+    # 保证真实请求体里 user_id 永远不是 null。
+    user_id = str(user_id or thread_id)
+    output_msg: cl.Message | None = None
+    step: cl.Step | None = None
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+        try:
+            interrupt_data, output_msg, step = await _stream_conversation(
+                thread_id=thread_id,
+                message=message.content or "",
+                client=client,
+                user_id=user_id,
+                output_msg=output_msg,
+                step=step,
+            )
+
+            # 审批循环：同一轮里可能连续出现多个需要审批的调用。
+            # 同一 approval_id 只问一次：重复帧（服务端重放/重连）复用上次决定，不再发卡片。
+            decisions: dict[str, str | None] = {}
+            # 幂等护栏：记下已展示过的 approval_id。重复帧直接忽略，
+            # 既不重复渲染卡片，也不重复调用 resume（避免同一次执行被放行两次）。
+            shown_approval_ids: set[str] = set()
+            while interrupt_data:
+                if not _register_approval(interrupt_data, shown_approval_ids):
+                    break
+                decision = await _decide_approval(interrupt_data, decisions)
+
+                if decision == APPROVAL_ACTION_APPROVE:
+                    state, interrupt_data, output_msg, step = await _resume_conversation(
+                        thread_id=thread_id,
+                        interrupt_data=interrupt_data,
+                        decision=APPROVAL_ACTION_APPROVE,
+                        client=client,
+                        output_msg=output_msg,
+                        step=step,
+                    )
+                    if state != "resumed":
+                        break
+                elif decision == APPROVAL_ACTION_REJECT:
+                    await cl.Message(content="🙅 已拒绝执行，本次调用未被发起。").send()
+                    break
+                else:
+                    # 超时：按 reject 处理，不调用 resume
+                    await cl.Message(
+                        content=(
+                            f"⏰ 审批超时（{APPROVAL_TIMEOUT_SECONDS} 秒），"
+                            "已自动拒绝，本次调用未被发起。"
+                        )
+                    ).send()
+                    break
+
+        except httpx.HTTPStatusError as exc:
+            await _write_error(f"后端错误 (HTTP {exc.response.status_code})", output_msg)
+            logger.exception("conversation 模式后端错误")
+        except httpx.TimeoutException:
+            await _write_error("请求超时，请重试", output_msg)
+            logger.exception("conversation 模式超时")
+        except Exception as exc:  # noqa: BLE001
+            await _write_error(f"服务异常：{exc}", output_msg)
+            logger.exception("conversation 模式未知错误")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -405,9 +832,7 @@ async def _handle_uploaded_files(file_elements: list) -> None:
 
         await cl.Message(
             content=(
-                f"✅ 文档 **{file_name}** 已提交处理\n\n"
-                f"- task_id: `{task_id}`\n"
-                f"- 状态: `{status}`"
+                f"✅ 文档 **{file_name}** 已提交处理\n\n- task_id: `{task_id}`\n- 状态: `{status}`"
             ),
             actions=[
                 cl.Action(name="check_task", payload={"task_id": task_id}, label="🔍 查询状态"),
@@ -513,6 +938,9 @@ async def on_chat_start() -> None:
 
     cl.user_session.set(SESSION_USER_NAME, user_name)
     cl.user_session.set(SESSION_THREAD_ID, thread_id)
+    # 模式开关：默认 deep_research（旧流程），用户可在设置面板切到 conversation
+    cl.user_session.set(SESSION_MODE, DEFAULT_CHAT_MODE)
+    await _make_chat_settings().send()
 
     logger.info(
         "会话启动: user=%s, thread_id=%s, dev_mode=%s",
@@ -542,7 +970,14 @@ async def on_message(message: cl.Message) -> None:  # noqa: C901
     4. 第二阶段（确认继续）传入 lazy_create_step=True，由 _stream_agent 在首个
        思考事件到达时创建并发送 Step，使 Step.send() 与 Message.stream_start()
        紧密执行；取消路径 suppress_thinking=True，不渲染思考过程/KPI
+
+    模式分流：conversation 模式在函数最前面整体交给 _on_conversation_message，
+    旧 deep_research 流程一行不改。
     """
+    if _current_mode() == MODE_CONVERSATION:
+        await _on_conversation_message(message)
+        return
+
     thread_id: str = cl.user_session.get(SESSION_THREAD_ID)
     if not thread_id:
         await cl.Message(content="❌ 会话未初始化，请刷新页面。").send()

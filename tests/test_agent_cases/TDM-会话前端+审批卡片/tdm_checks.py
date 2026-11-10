@@ -566,13 +566,19 @@ def check_b1b_forbidden_clean() -> str:
 
 
 def check_b2_old_flow_untouched() -> str:
-    """旧流程零改动：frontend/app.py 只新增、无删除行。"""
-    numstat = _git("diff", "--numstat", "--", "frontend/app.py")
-    assert numstat, "frontend/app.py 没有 diff，无法判断"
+    """旧流程零改动：frontend/app.py 只新增、无删除行。
+
+    口径取「最后一次改到 frontend/app.py 的提交」，而不是工作区 diff：改动一旦提交，
+    git diff 就为空，按工作区比较会把已完成的修复误判成「无法判断」。
+    """
+    rev = _git("log", "-1", "--format=%H", "--", "frontend/app.py")
+    assert rev, "frontend/app.py 没有提交记录，无法判断"
+    numstat = _git("show", "--numstat", "--format=", rev, "--", "frontend/app.py")
+    assert numstat, f"提交 {rev[:7]} 未改到 frontend/app.py，无法判断"
     added, deleted = numstat.split()[:2]
     assert int(deleted) == 0, f"旧代码被删除/改写: -{deleted} 行"
     assert int(added) > 0, "没有新增代码"
-    return f"frontend/app.py +{added}/-{deleted}（纯新增，旧 _stream_agent 未改）"
+    return f"frontend/app.py +{added}/-{deleted}（纯新增，旧 _stream_agent 未改；提交 {rev[:7]}）"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -696,8 +702,8 @@ def check_c3b_distinct_approvals() -> str:
 
 
 def check_c3c_duplicate_reuse() -> str:
-    """C3 重复帧：同 approval_id 不再弹卡，复用上次决定继续 resume；reject/超时不重复提示。"""
-    # 1) approve：同 approval_id 第二次出现 -> 1 张卡、2 次 resume（复用 approve）
+    """C3 重复帧：同 approval_id 不再弹卡，也不再 resume；reject/超时不重复提示。"""
+    # 1) approve：同 approval_id 第二次出现 -> 1 张卡、1 次 resume（重复帧被忽略）
     _reset()
     app.cl.user_session = FakeUserSession({app.SESSION_THREAD_ID: "tid-c3c"})
     dup = dict(INTERRUPT_DATA, approval_id="apr_reuse")
@@ -713,8 +719,10 @@ def check_c3c_duplicate_reuse() -> str:
     cards = _approval_cards()
     resumes = _resume_calls()
     assert len(cards) == 1, f"同 approval_id 显示了 {len(cards)} 张卡片"
-    assert len(resumes) == 2, f"重复帧未复用决定继续 resume（resume 次数={len(resumes)}）"
-    assert all(c["json"]["decision"] == "approve" for c in resumes), "复用的决定不是 approve"
+    assert len(resumes) == 1, f"重复帧不应再次 resume（resume 次数={len(resumes)}）"
+    assert all(c["json"]["decision"] == "approve" for c in resumes), (
+        "resume 的 decision 不是 approve"
+    )
 
     # 2) reject：重复帧不得第二次提示，也不得调用 resume
     _reset()
@@ -746,7 +754,7 @@ def check_c3c_duplicate_reuse() -> str:
     assert len(_approval_cards()) == 1, "超时路径重复弹卡"
     assert len(timeout_msgs) == 1, f"超时提示重复了 {len(timeout_msgs)} 次"
     assert _resume_calls() == [], "超时路径调用了 resume"
-    return "同 approval_id：1 卡 + 2 次 resume 复用 approve；reject/超时各 1 次提示、0 resume"
+    return "同 approval_id：1 卡 + 1 次 resume；重复帧被忽略；reject/超时各 1 次提示、0 resume"
 
 
 CHECKS: list[tuple[str, str, Any]] = [
@@ -770,7 +778,7 @@ CHECKS: list[tuple[str, str, Any]] = [
     ("TDM-C2", "同 thread_id 连轮", check_c2_same_thread_two_rounds),
     ("TDM-C3", "同 approval_id 卡片去重", check_c3_duplicate_card),
     ("TDM-C3b", "不同 approval_id 各一张卡", check_c3b_distinct_approvals),
-    ("TDM-C3c", "重复帧复用决定 / reject 超时不重复", check_c3c_duplicate_reuse),
+    ("TDM-C3c", "重复帧忽略 / reject 超时不重复", check_c3c_duplicate_reuse),
 ]
 
 
