@@ -321,7 +321,7 @@ def check_c() -> None:
         f"judge_model()={got or '<空>'} exit={rc}",
     )
 
-    py = "from config import settings;" "print(settings.EVAL_JUDGE_MODEL or '<空>')"
+    py = "from config import settings;print(settings.EVAL_JUDGE_MODEL or '<空>')"
     rc2, out2 = sh([sys.executable, "-c", py], env={"EVAL_JUDGE_MODEL": ""})
     v = out2.strip().splitlines()[-1] if out2.strip() else ""
     check(

@@ -111,7 +111,7 @@ async def writer(state: AgentState, config: RunnableConfig | None = None) -> dic
 
     # 构建 prompt
     user_prompt = (
-        f"用户提问：{query}\n\n" f"参考资料：\n{context}\n\n" f"请根据以上参考资料，撰写调研报告。"
+        f"用户提问：{query}\n\n参考资料：\n{context}\n\n请根据以上参考资料，撰写调研报告。"
     )
 
     prompt = f"{SYSTEM_PROMPT}\n\n{user_prompt}"

@@ -251,9 +251,9 @@ def check_a1a_mode_switch() -> str:
     assert app._current_mode() == app.MODE_DEEP_RESEARCH, "非法模式未回落 deep_research"
 
     settings = app._make_chat_settings().settings()
-    assert (
-        settings[app.SESSION_MODE] == app.MODE_DEEP_RESEARCH
-    ), "ChatSettings 初值不是 deep_research"
+    assert settings[app.SESSION_MODE] == app.MODE_DEEP_RESEARCH, (
+        "ChatSettings 初值不是 deep_research"
+    )
 
     called: list[str] = []
 
@@ -267,9 +267,9 @@ def check_a1a_mode_switch() -> str:
     finally:
         app._on_conversation_message = _ORIG_ON_CONVERSATION
 
-    assert called == [
-        "hi"
-    ], f"conversation 模式未分流到 _on_conversation_message（called={called}）"
+    assert called == ["hi"], (
+        f"conversation 模式未分流到 _on_conversation_message（called={called}）"
+    )
     return "默认/非法值均深调研；ChatSettings 初值正确；切 conversation 后 on_message 分流成功"
 
 
@@ -287,9 +287,9 @@ def check_a1b_request_body() -> str:
     body = call["json"]
     assert body.get("thread_id") == "tid-1", f"thread_id 错误: {body!r}"
     assert body.get("message") == "hi", f"message 错误: {body!r}"
-    assert (
-        body.get("user_id") == "tid-1"
-    ), f"user_id 缺省时未回退 thread_id（实发 {body.get('user_id')!r}）"
+    assert body.get("user_id") == "tid-1", (
+        f"user_id 缺省时未回退 thread_id（实发 {body.get('user_id')!r}）"
+    )
     return f"POST /chat/conversation body={body!r}"
 
 
@@ -319,9 +319,9 @@ def check_a1c_explicit_user_id() -> str:
         )
     )
     explicit_body = client.calls[0]["json"]
-    assert (
-        explicit_body.get("user_id") == "u-explicit"
-    ), f"直传 user_id 被覆盖: {explicit_body.get('user_id')!r}"
+    assert explicit_body.get("user_id") == "u-explicit", (
+        f"直传 user_id 被覆盖: {explicit_body.get('user_id')!r}"
+    )
     return "显式 user_id='developer' 原样发送；直传 'u-explicit' 也未被覆盖"
 
 
@@ -395,9 +395,9 @@ def check_a4_unknown_type() -> str:
         {"type": "final", "content": "正常"},
     )
     _, output_msg, _ = asyncio.run(_consume(lines))
-    assert (
-        output_msg is not None and output_msg.content == "正常"
-    ), f"未知帧影响了正常渲染: {output_msg and output_msg.content!r}"
+    assert output_msg is not None and output_msg.content == "正常", (
+        f"未知帧影响了正常渲染: {output_msg and output_msg.content!r}"
+    )
     assert "垃圾" not in output_msg.content, "未知帧内容泄漏到用户可见输出"
     return "whatever 帧被静默忽略；正常 token/final 渲染不受影响"
 
@@ -419,9 +419,9 @@ def check_a5_approval_card() -> str:
     for field in ("工具名", "参数摘要", "预估成本", "剩余预算", "到期时间"):
         assert field in card.content, f"卡片缺字段: {field}"
     assert "deep_research" in card.content and "0.10 元" in card.content, "工具名/成本未渲染"
-    assert (
-        "2.00 元" in card.content and "2026-11-10T20:00:00+08:00" in card.content
-    ), "预算/到期未渲染"
+    assert "2.00 元" in card.content and "2026-11-10T20:00:00+08:00" in card.content, (
+        "预算/到期未渲染"
+    )
 
     ask = FakeAskActionMessage.last_instance
     assert ask is not None, "没有弹 AskActionMessage"
@@ -449,9 +449,9 @@ def check_a6_approve_resume() -> str:
     client = FakeAsyncClient.instances[-1]
     assert len(client.calls) == 2, f"HTTP 调用数不对: {client.calls!r}"
     resume = client.calls[1]
-    assert resume["url"].endswith(
-        "/chat/conversation/tid-6/resume"
-    ), f"resume URL 错误: {resume['url']}"
+    assert resume["url"].endswith("/chat/conversation/tid-6/resume"), (
+        f"resume URL 错误: {resume['url']}"
+    )
     body = resume["json"]
     assert set(body) == {"approval_id", "decision", "request_id", "token"}, f"字段不全: {body!r}"
     assert body["approval_id"] == "apr_demo_001", f"approval_id 错误: {body!r}"
@@ -496,9 +496,9 @@ def check_a7_resume_disabled() -> str:
     app.httpx.AsyncClient = FakeAsyncClient  # type: ignore[assignment]
     FakeAskActionMessage.queue = [{"payload": {"value": app.APPROVAL_ACTION_APPROVE}}]
     _run_drive()
-    assert any(
-        "审批功能未启用（等待 T9-2）" in m.content for m in SENT_MESSAGES
-    ), "404 后没有 审批功能未启用 提示"
+    assert any("审批功能未启用（等待 T9-2）" in m.content for m in SENT_MESSAGES), (
+        "404 后没有 审批功能未启用 提示"
+    )
 
     # 405 同样处理
     SENT_MESSAGES.clear()
@@ -508,9 +508,9 @@ def check_a7_resume_disabled() -> str:
     ]
     FakeAskActionMessage.queue = [{"payload": {"value": app.APPROVAL_ACTION_APPROVE}}]
     _run_drive()
-    assert any(
-        "审批功能未启用（等待 T9-2）" in m.content for m in SENT_MESSAGES
-    ), "405 后没有 审批功能未启用 提示"
+    assert any("审批功能未启用（等待 T9-2）" in m.content for m in SENT_MESSAGES), (
+        "405 后没有 审批功能未启用 提示"
+    )
     return "404 与 405 均显示'审批功能未启用（等待 T9-2）'，无异常、流程正常结束"
 
 
@@ -646,9 +646,9 @@ def check_c3_duplicate_card() -> str:
     _run_drive()
 
     cards = [m for m in SENT_MESSAGES if "审批请求" in m.content]
-    assert (
-        len(cards) == 1
-    ), f"同 approval_id=apr_dup_001 显示了 {len(cards)} 张卡片（未按 approval_id 去重）"
+    assert len(cards) == 1, (
+        f"同 approval_id=apr_dup_001 显示了 {len(cards)} 张卡片（未按 approval_id 去重）"
+    )
     return "同 approval_id 只显示 1 张卡片"
 
 
@@ -684,9 +684,9 @@ def check_c3b_distinct_approvals() -> str:
 
     cards = _approval_cards()
     assert len(cards) == 2, f"两个不同 approval_id 只显示了 {len(cards)} 张卡片（过度去重）"
-    assert (
-        "deep_research" in cards[0].content and "calculator" in cards[1].content
-    ), "卡片与 approval_id 的对应关系错乱"
+    assert "deep_research" in cards[0].content and "calculator" in cards[1].content, (
+        "卡片与 approval_id 的对应关系错乱"
+    )
     bodies = [c["json"] for c in _resume_calls()]
     assert [b["approval_id"] for b in bodies] == [
         "apr_a",

@@ -110,8 +110,8 @@ if __name__ == "__main__":
         result = await graph.ainvoke({"messages": [HumanMessage(content="3.14 的平方根是多少？")]})
         # 提取最后一条 AI 消息的内容并打印
         final_message = result["messages"][-1]
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"最终回复: {final_message.content}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
     asyncio.run(_main())

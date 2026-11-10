@@ -52,9 +52,7 @@ class ProfileStore(Protocol):
     ) -> None: ...
 
 
-def build_extraction_prompt(
-    messages: list[Any], summary: str = "", max_messages: int = 20
-) -> str:
+def build_extraction_prompt(messages: list[Any], summary: str = "", max_messages: int = 20) -> str:
     """把最近若干条消息拼成抽取用的 prompt（只取尾部，控制成本）。"""
     recent = messages[-max_messages:]
     lines: list[str] = []
