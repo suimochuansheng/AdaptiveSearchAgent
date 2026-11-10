@@ -6,6 +6,7 @@
 from enum import StrEnum
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -66,6 +67,17 @@ class Settings(BaseSettings):
     ALIYUN_QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     # qwen 3.8-max模型 新增控制思考深度的参数
     ALIYUN_QWEN_MODEL_REASONING_EFFORT: str = "medium"
+    # 评测裁判模型（Ragas 三指标 + Agent judge 共用）。
+    # 留空时取 ALIYUN_QWEN_MODEL_NAME，保证"裁判是谁"只有一个事实来源；
+    # 需要临时换裁判时用环境变量 EVAL_JUDGE_MODEL=... ，不要改 .env。
+    EVAL_JUDGE_MODEL: str = ""
+
+    @model_validator(mode="after")
+    def _fill_eval_judge_model(self) -> "Settings":
+        if not self.EVAL_JUDGE_MODEL:
+            self.EVAL_JUDGE_MODEL = self.ALIYUN_QWEN_MODEL_NAME
+        return self
+
     # 结果可信度阈值（0~1）
     confidence_threshold: float = 0.8
     # 枚举字段，控制 planner 和 evaluator 使用的模型提供商

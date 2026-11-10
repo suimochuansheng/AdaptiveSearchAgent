@@ -67,7 +67,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 logger = logging.getLogger("ragas-eval")
 
 # ── 阿里云百炼配置（裁判 + 生成）─────────────────────────────
-QWEN_MODEL = settings.ALIYUN_QWEN_MODEL_NAME
+# 裁判名统一取 Settings.EVAL_JUDGE_MODEL（默认 = ALIYUN_QWEN_MODEL_NAME），
+# 保证脚本打印的、报告里写的、实际调用的三处是同一个名字。
+QWEN_MODEL = settings.EVAL_JUDGE_MODEL
 QWEN_API_KEY = settings.ALIYUN_QWEN_API_KEY
 QWEN_BASE_URL = settings.ALIYUN_QWEN_BASE_URL
 
@@ -312,6 +314,7 @@ async def evaluate_rag(args=None) -> dict:  # noqa: C901
     ragas_rows: list[dict] = []
     meta_rows: list[dict] = []
     retrieval_errors = 0
+    retrieval_retries = 0
     generation_fallbacks = 0
     context_sizes: list[int] = []
 
@@ -332,6 +335,23 @@ async def evaluate_rag(args=None) -> dict:  # noqa: C901
             skip_reranker=True,
         )
         passages = _parse_passages_from_context(context)
+        if not passages:
+            # 并发下网关偶发返回空（T0-1 异常 B）：同题自动重试 1 次，
+            # 仍为空才计 retrieval_errors。重试次数单独记进报告，便于归因。
+            retrieval_retries += 1
+            logger.warning(
+                "[%d/%d] 检索空结果，自动重试 1 次: %s", idx + 1, len(test_data), question[:50]
+            )
+            await asyncio.sleep(2)
+            context = await search_knowledge(
+                question,
+                top_k=retrieval_top_k,
+                kb_id=kb_id,
+                model=model_name,
+                search_mode="hybrid",
+                skip_reranker=True,
+            )
+            passages = _parse_passages_from_context(context)
         if not passages:
             retrieval_errors += 1
 
@@ -380,10 +400,11 @@ async def evaluate_rag(args=None) -> dict:  # noqa: C901
 
     t_retrieval_elapsed = time.perf_counter() - t_retrieval_start
     logger.info(
-        "检索+生成完成: %d 条, 耗时 %.1fs, 检索空结果 %d 次, 生成降级 %d 次",
+        "检索+生成完成: %d 条, 耗时 %.1fs, 检索空结果 %d 次（重试 %d 次）, 生成降级 %d 次",
         len(ragas_rows),
         t_retrieval_elapsed,
         retrieval_errors,
+        retrieval_retries,
         generation_fallbacks,
     )
 
@@ -480,6 +501,7 @@ async def evaluate_rag(args=None) -> dict:  # noqa: C901
             "total": round(t_total, 1),
         },
         "retrieval_errors": retrieval_errors,
+        "retrieval_retries": retrieval_retries,
         "generation_fallbacks": generation_fallbacks,
         # 归因只作参考项：golden 集的 source_file 是单值，且同一答案可能来自多篇文档
         "doc_attribution_reference_only": True,
@@ -544,7 +566,7 @@ async def evaluate_rag(args=None) -> dict:  # noqa: C901
     )
     print(
         f"🔧 并发 workers: {actual_workers}  |  检索空结果: {retrieval_errors} 次  |  "
-        f"生成降级: {generation_fallbacks} 次"
+        f"空检索重试: {retrieval_retries} 次  |  生成降级: {generation_fallbacks} 次"
     )
     print(
         f"🎯 归因（参考项）: hit@1={summary['doc_hit_at_1']:.2%}  "

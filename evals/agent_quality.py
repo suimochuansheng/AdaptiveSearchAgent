@@ -17,7 +17,8 @@
     poetry run python evals/agent_quality.py --compare <baseline.json>
 
 说明：
-- judge 默认用阿里云百炼的 qwen 模型（settings.ALIYUN_QWEN_*），与被测模型解耦；
+- judge 默认用阿里云百炼的 qwen 模型（settings.EVAL_JUDGE_MODEL，默认取
+  settings.ALIYUN_QWEN_MODEL_NAME），与被测模型解耦；
 - 每题独立 thread_id，避免上下文串味；
 - 不依赖 Ragas：judge 只对比"回答 vs 参考答案"，不要求提供 contexts。
 """
@@ -47,8 +48,9 @@ from config import settings  # noqa: E402
 
 DEFAULT_DATASET = _PROJ / "evals" / "datasets" / "qa_dataset_v3.yaml"
 # 必须与 Ragas 基线报告里的 judge_model 一致，否则两次分数不可比。
-# 取自 .env 的 ALIYUN_QWEN_MODEL_NAME：换裁判只改 .env，不用改代码。
-DEFAULT_JUDGE_MODEL = settings.ALIYUN_QWEN_MODEL_NAME
+# 取自 settings.EVAL_JUDGE_MODEL（默认 = ALIYUN_QWEN_MODEL_NAME）：换裁判只改
+# 环境变量或 .env，不用改代码；启动时会打印实际使用的裁判名。
+DEFAULT_JUDGE_MODEL = settings.EVAL_JUDGE_MODEL
 from src.utils.report_paths import eval_report_dir  # noqa: E402
 
 REPORT_DIR = eval_report_dir()
@@ -315,7 +317,7 @@ def main() -> int:
     parser.add_argument(
         "--judge-model",
         default=DEFAULT_JUDGE_MODEL,
-        help="裁判模型（必须与基线一致，默认 qwen3.8-flash）",
+        help="裁判模型（必须与基线一致；默认 settings.EVAL_JUDGE_MODEL）",
     )
     parser.add_argument("--no-judge", action="store_true", help="只收集回答，不打分")
     parser.add_argument("--label", default="current", help="这次跑的标签，如 baseline/current")
@@ -325,6 +327,10 @@ def main() -> int:
         "--max-drop", type=float, default=2.0, help="平均分允许下降幅度，超出则退出码 1"
     )
     args = parser.parse_args()
+
+    # 裁判名必须可见：否则"同口径"复跑会悄悄换成另一款裁判。
+    judge_label = "（--no-judge）" if args.no_judge else args.judge_model
+    print(f"裁判模型: {judge_label} | 数据集: {args.dataset} | 后端: {args.base_url}", flush=True)
 
     if args.compare:
         baseline = json.loads(Path(args.compare).read_text(encoding="utf-8"))
@@ -363,7 +369,9 @@ def main() -> int:
 
 
 def _default_output(label: str) -> Path:
-    return REPORT_DIR / f"agent_eval_{label}_{_git_commit()}.json"
+    # 带时间戳：同 label 复跑不互相覆盖（判据要求"同口径跑 2 次"）。
+    stamp = time.strftime("%Y%m%d-%H%M")
+    return REPORT_DIR / f"agent_eval_{label}_{_git_commit()}_{stamp}.json"
 
 
 def _latest_report() -> Path | None:

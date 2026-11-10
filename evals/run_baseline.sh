@@ -19,7 +19,8 @@
 #   MAX_WORKERS=2                 Ragas 并发（默认 2：4 并发下 RAG 偶发空检索）
 #   TIMEOUT=120                   单任务超时（秒）
 #   RERANKER=ms-marco|bge         默认 bge（BGE 精排；首次会加载 2.2G 模型）
-#   TAG=<归档名>                  默认 时间戳_model_reranker_dataset
+#   EVAL_JUDGE_MODEL=<model>      裁判模型（默认取 .env 的 ALIYUN_QWEN_MODEL_NAME）
+#   TAG=<归档名>                  默认 时间戳_model_reranker_dataset；实际目录为 <TAG>_<YYYYmmdd-HHMM>
 #   INGEST_URL=http://localhost:8100   评测脚本调用的 RAG 网关（必须是已启动的 ingest_dev）
 #
 # 前置条件：RAG 网关必须已经在跑，脚本不会自动兜底：
@@ -67,7 +68,7 @@ if [ "$SMOKE" = "1" ]; then
   TAG="${TAG:-smoke_$(date +%Y%m%d_%H%M%S)}"
 fi
 [ -n "$TAG" ] || TAG="$(date +%Y%m%d_%H%M%S)_${MODEL}_${RERANKER}_ollama_$(basename "$DATASET" .yaml)"
-TAGDIR="$REPORT_DIR/$TAG"
+TAGDIR="$REPORT_DIR/${TAG}_$(date +%Y%m%d-%H%M)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 
 # ── 输出 ─────────────────────────────────────────────────────────────────────
@@ -128,6 +129,14 @@ env_val() {  # env_val KEY：从 .env 读取（不打印敏感值）
   grep -E "^${1}=" "$PROJECT_DIR/.env" | tail -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//' || true
 }
 
+# 裁判名唯一来源：EVAL_JUDGE_MODEL（环境变量 > .env）→ 回退 ALIYUN_QWEN_MODEL_NAME。
+# 与 config.py 的 Settings.EVAL_JUDGE_MODEL 默认值保持一致。
+judge_model() {
+  local m="${EVAL_JUDGE_MODEL:-$(env_val EVAL_JUDGE_MODEL)}"
+  [ -n "$m" ] || m="$(env_val ALIYUN_QWEN_MODEL_NAME)"
+  printf '%s' "$m"
+}
+
 # ── 1. 基础预检 ──────────────────────────────────────────────────────────────
 log "项目目录: $PROJECT_DIR"
 need_cmd poetry
@@ -164,7 +173,7 @@ PY
 
 log "黄金集: $DATASET（${QUESTION_COUNT} 题）"
 log "模型: $MODEL (Ollama: $OLLAMA_EMBED) | KB: $KB_ID | TOP_K: $TOP_K | Reranker: $RERANKER"
-log "答案生成: 本地 $(env_val OLLAMA_MODEL_NAME) | Ragas 裁判: $(env_val ALIYUN_QWEN_MODEL_NAME)"
+log "答案生成: 本地 $(env_val OLLAMA_MODEL_NAME) | Ragas 裁判: $(judge_model)"
 
 # ── 2. 关键告警（不阻断，但请先读）───────────────────────────────────────────
 if [ "$RERANKER" = "bge" ]; then
@@ -180,7 +189,7 @@ case "$DATASET" in
 esac
 
 # 生成器固定为本地 Ollama（被测 RAG 系统），裁判固定为 Qwen API
-log "生成器: 本地 $(env_val OLLAMA_MODEL_NAME) | 裁判: $(env_val ALIYUN_QWEN_MODEL_NAME)"
+log "生成器: 本地 $(env_val OLLAMA_MODEL_NAME) | 裁判: $(judge_model)"
 
 if [ -z "$(env_val ALIYUN_QWEN_API_KEY)" ]; then
   die ".env 里 ALIYUN_QWEN_API_KEY 为空，Ragas 无法调用裁判 LLM"
@@ -226,7 +235,8 @@ ${c_grn}== DRY RUN 预检通过，未调用任何 LLM ==${c_rst}
   KB_ID       : $KB_ID
   TOP_K       : $TOP_K（候选 retrieval_top_k=$RETRIEVAL_K → 网关最多 3×=$CTX_MAX 片 → BGE 精排回 $TOP_K 片）
   答案生成    : 本地 $(env_val OLLAMA_MODEL_NAME)
-  裁判        : $(env_val ALIYUN_QWEN_MODEL_NAME)
+  裁判        : $(judge_model)
+  并发 workers: $MAX_WORKERS
   RAG 子服务  : $INGEST_URL
   报告归档    : $TAGDIR
   执行命令    : INGEST_SERVICE_URL=$INGEST_URL poetry run python evals/rag_quality.py \\
@@ -297,7 +307,7 @@ Embedding     : $MODEL / $OLLAMA_EMBED
 Reranker      : $RERANKER
 KB_ID         : $KB_ID
 TOP_K         : $TOP_K（候选 retrieval_top_k=$RETRIEVAL_K，网关最多 3×=$CTX_MAX 片；BGE 精排回 $TOP_K 片）
-裁判 LLM      : $(env_val ALIYUN_QWEN_MODEL_NAME)
+裁判 LLM      : $(judge_model)（EVAL_JUDGE_MODEL，默认取 ALIYUN_QWEN_MODEL_NAME）
 生成 LLM      : 本地 $(env_val OLLAMA_MODEL_NAME)
 项目 Agent LLM: $(env_val OLLAMA_MODEL_NAME)
 RAG 子服务    : $INGEST_URL
