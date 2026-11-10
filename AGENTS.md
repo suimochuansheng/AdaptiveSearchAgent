@@ -10,7 +10,7 @@
 |--------|---------------------|
 | 简称 | adsearchagent |
 | 描述 | 基于 LangGraph / LangChain 的自适应搜索代理 |
-| 当前阶段 | 初期搭建 — 基础设施已就绪，核心逻辑待实现 |
+| 当前阶段 | 骨架期 — `agent/` 三层骨架已落地，适配器与组合根待 T2-2；`src/` 仍在现役 |
 | 运行环境 | WSL2 (Linux 6.6.87.2-microsoft-standard-WSL2) |
 | 作者 | suimo (huazhu7k7k@163.com) |
 
@@ -78,26 +78,43 @@ AdaptiveSearchAgent/
 ├── AGENTS.md                     # ← 本文件：AI Agent 入口文档
 ├── CLAUDE.md                     # 开发环境详细说明（辅助参考）
 ├── .clinerules/development.md    # 项目开发规范（工作流程/编码/Git/语言）
-├── pyproject.toml                # Poetry 项目配置 + ruff 配置
+├── pyproject.toml                # Poetry 配置 + ruff/mypy/import-linter 规则
 ├── poetry.lock                   # 依赖版本锁定
 ├── config.py                     # pydantic-settings 配置类
+├── api_main.py                   # FastAPI 入口（SSE 流式 / 会话 / 中断恢复）
+├── langgraph.json                # LangGraph 配置
 ├── .env                          # 环境变量（敏感信息，gitignore 已排除）
 ├── .gitignore                    # Git 忽略规则
-├── .pre-commit-config.yaml       # Pre-commit 钩子（ruff + mypy）
-├── data/                         # 数据目录（预留，空）
-├── logs/                         # 日志目录（预留，空）
-├── src/
-│   ├── __init__.py               # 空
-│   ├── state.py                  # Agent 状态定义（空，待实现）
-│   ├── agents/
-│   │   └── __init__.py           # 空
-│   ├── tools/
-│   │   └── __init__.py           # 空
-│   └── utils/
-│       ├── __init__.py           # 空
-│       └── json_parser.py        # JSON 解析工具（空，待实现）
+├── .pre-commit-config.yaml       # Pre-commit 钩子（ruff 0.15.22 + mypy 2.3.1）
+├── data/                         # 数据目录（预留）
+├── logs/                         # 日志目录（预留）
+├── docs/
+│   ├── architecture.md           # 三层架构与依赖规则（T1-1）
+│   ├── baseline.md               # 评测口径与 raw 基线（T0-2）
+│   └── screenshots/              # 文档配图
+├── agent/                        # 三层骨架（T1-1，仅 docstring，无实现）
+│   ├── domain/                   # 实体与规则（tool/task/roles/context/message/memory/session）
+│   ├── app/                      # ports（7 端口占位）与 hooks
+│   └── adapters/                 # runtime/models/stores/locks/tasks/events/api/tools
+├── src/                          # 现役实现（后续迁往 agent/）
+│   ├── state.py                  # Agent 状态定义
+│   ├── graph_factory.py          # 图工厂
+│   ├── conversation_graph.py     # 会话式 Agent 主循环
+│   ├── conversation_stream.py    # 会话 SSE 流
+│   ├── checkpointer.py           # 检查点 / 持久化
+│   ├── context_manager.py        # 上下文预算
+│   ├── agents/                   # planner/search_worker/parallel_searcher/writer/evaluator/hitl_confirm
+│   ├── tools/                    # rag/search/calculator/offload/stub_research
+│   ├── memory/                   # 画像抽取与上下文构建
+│   └── utils/                    # logger/llm_factory/embedding/metrics 等
+├── frontend/                     # Chainlit 前端（G9 会话前端在 feature/frontend-tdm）
+├── evals/                        # 评测脚本（raw 基线 / agent 质量）
+├── scripts/                      # 运维脚本
 └── tests/
-    └── __init__.py               # 空
+    ├── test_agent_cases/         # 测试窗口的卡级用例与台账（GB18030）
+    ├── api/                      # API 契约测试
+    ├── test_frontend/            # 前端相关测试
+    └── test_*.py                 # 23 个模块级测试文件（223 passed / 4 skipped）
 ```
 
 ### 已排除（gitignore）
@@ -107,6 +124,7 @@ AdaptiveSearchAgent/
 | `.env` | 含 API Key |
 | `.deepcode/` `.claude/` | AI 工具配置，含 API Key / 自动生成内容 |
 | `.mypy_cache/` `.ruff_cache/` | 工具缓存 |
+| `__pycache__/` | Python 字节码缓存 |
 | `test_skills.py` | 临时脚本 |
 | `.vscode/` `.idea/` | IDE 配置 |
 
@@ -116,14 +134,18 @@ AdaptiveSearchAgent/
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| `src/state.py` | 空 | Agent 状态定义待实现 |
-| `src/agents/` | 空 | Agent 节点逻辑待实现 |
-| `src/tools/` | 空 | 工具函数待实现 |
-| `src/utils/json_parser.py` | 空 | JSON 解析待实现 |
+| `agent/`（domain/app/adapters） | 骨架 | 仅 docstring；端口签名与适配器待 T1-2 / T2-2 |
+| `src/state.py` | 已完成 | 82 行，Agent 状态定义 |
+| `src/agents/` | 已完成 | planner / search_worker / parallel_searcher / writer / evaluator / hitl_confirm |
+| `src/tools/` | 已完成 | rag / search / calculator / offload / stub_research |
+| `src/memory/` | 已完成 | 画像抽取（LLM 可注入）与上下文构建 |
+| `api_main.py` | 已完成 | FastAPI + SSE 流式 + 中断恢复 |
+| `frontend/` | 分支开发中 | G9 会话前端在 `feature/frontend-tdm`，待后端联调后合入 |
+| `evals/` | 已完成 | raw 基线 / agent 质量评测（T0-2） |
 | `config.py` | 已完成 | Settings 类，支持 .env 自动加载 |
-| `tests/` | 空 | 测试待编写 |
+| `tests/` | 已完成 | 223 passed / 4 skipped；另有 `tests/test_agent_cases/` 卡级用例与台账 |
 
-> **总结**：项目骨架已搭好，所有包管理、代码质量工具链、配置管理已就绪，可直接开始编写核心业务代码。
+> **总结**：`src/` 业务实现已可用，`agent/` 三层骨架与依赖规则已落地；下一步是 T2-2 的适配器与组合根。
 
 ---
 
@@ -240,8 +262,11 @@ settings.MODEL_NAME
 |------|------|
 | `CLAUDE.md` | 开发环境详细说明（环境配置、依赖表、工具链） |
 | `.clinerules/development.md` | 开发规范原文（工作流程、编码、Git、语言） |
-| `pyproject.toml` | Poetry 依赖声明 + ruff 配置 |
+| `pyproject.toml` | Poetry 依赖声明 + ruff/mypy/import-linter 配置 |
 | `.pre-commit-config.yaml` | Pre-commit 钩子定义 |
+| `docs/architecture.md` | 三层架构、7 端口占位与依赖规则（T1-1） |
+| `docs/baseline.md` | 评测口径、raw 基线与裁判说明（T0-2） |
+| `tests/test_agent_cases/README.md` | 卡级用例与台账读写约定（GB18030） |
 
 ---
 
