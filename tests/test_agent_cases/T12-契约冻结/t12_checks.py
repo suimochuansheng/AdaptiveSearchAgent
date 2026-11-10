@@ -429,11 +429,13 @@ def check_domain_no_framework() -> str:
 
 
 def check_ledger_rows() -> str:
-    """台账 48 行 / 15 列（GB18030），0a 的 TDM-016 与 0b 的 T02-005 已落位。"""
+    """台账不少于 48 行 / 15 列（GB18030），0a 的 TDM-016 与 0b 的 T02-005 已落位。"""
     raw = LEDGER.read_bytes()
     text = raw.decode("gb18030")  # 关键：台账是 GB18030，不是 UTF-8
     rows = list(csv.reader(io.StringIO(text)))
-    assert len(rows) == LEDGER_ROWS + 1, f"台账行数不对: {len(rows)}（期望表头 + {LEDGER_ROWS}）"
+    # 2026-11-11 测试窗口裁定（OI-T12-003）：台账只允许追加，本卡自己就会 +10 行，
+    # 后续窗口亦然，故改为“不少于基线行数”；0a/0b 两行仍逐项校验。
+    assert len(rows) >= LEDGER_ROWS + 1, f"台账行数不足: {len(rows)}（基线表头 + {LEDGER_ROWS}）"
     bad = [i for i, row in enumerate(rows, 1) if len(row) != LEDGER_COLS]
     assert not bad, f"台账列数不是 {LEDGER_COLS}: 第 {bad} 行"
     by_id = {row[0]: row for row in rows[1:]}
@@ -443,7 +445,7 @@ def check_ledger_rows() -> str:
     assert by_id["T02-005"][10] == "block", f"T02-005 status 不是 block: {by_id['T02-005'][10]!r}"
     assert "计划窗口裁定" in by_id["T02-005"][13], "T02-005 notes 缺裁定说明"
     return (
-        f"台账 {LEDGER_ROWS} 行 × {LEDGER_COLS} 列（GB18030 解码通过）；"
+        f"台账 {len(rows) - 1} 行 × {LEDGER_COLS} 列（GB18030 解码通过，基线 {LEDGER_ROWS}）；"
         "TDM-016 notes=三字段/open_issue 空；T02-005 status=block"
     )
 
@@ -463,7 +465,7 @@ CHECKS: list[tuple[str, str, Callable[[], str]]] = [
     ("T12-012", "approval/resume 正文无第二凭证字段", check_no_token_in_contract_body),
     ("T12-013", "TraceSpan 十字段/六 kind/六 attrs", check_trace_span),
     ("T12-014", "agent/domain 零框架依赖", check_domain_no_framework),
-    ("T12-015", "台账 48 行 15 列 + 0a/0b 落位", check_ledger_rows),
+    ("T12-015", "台账 不少于 48 行 15 列 + 0a/0b 落位", check_ledger_rows),
 ]
 
 
