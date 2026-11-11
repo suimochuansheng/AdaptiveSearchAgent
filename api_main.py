@@ -31,7 +31,7 @@ from src.utils.logger import get_logger
 # 用 logging.getLogger(__name__) 会冒泡到 root 的 WARNING 默认级别，INFO 会静默丢失
 logger = get_logger()
 from contextlib import asynccontextmanager, nullcontext
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 # Sentry 崩溃自动捕获（仅当配置了 DSN 时启用）
@@ -45,6 +45,7 @@ from langgraph.types import Command
 from pydantic import BaseModel
 from redis import asyncio as aioredis
 
+from agent.adapters.api.hitl import frame_type
 from agent.adapters.api.hitl import router as hitl_router
 from agent.observability.langchain_handler import build_callbacks
 from agent.observability.tracer import get_tracer
@@ -283,6 +284,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 # G7/T9-2：外层 HITL resume 路由（ENABLE_HITL 关闭时 handler 直接 404）
 app.include_router(hitl_router)
+if settings.ENABLE_HITL and not settings.ENABLE_TOOL_POLICY:
+    logger.warning("ENABLE_HITL 已开启但 ENABLE_TOOL_POLICY 未开启，工具不会被包装，审批不会触发")
 
 # ---------- CORS 中间件（允许前端 file:// 或 localhost 跨域访问）----------
 app.add_middleware(
@@ -707,6 +710,9 @@ async def chat_conversation(request: Request, body: ConversationRequest):
             await set_task_state(thread_id, "idle")
         else:
             raise HTTPException(429, "该会话正在执行中，请稍后再试")
+    elif status == "interrupted":
+        # 挂起等审批与"正在执行"语义不同：409 让前端先完成审批，而不是 429 重试
+        raise HTTPException(409, "该会话有待审批的请求，请先完成审批")
 
     lock = redis_client.lock(f"agent_lock:{thread_id}", timeout=600)
     acquired = await lock.acquire(blocking=False)
@@ -732,6 +738,8 @@ async def chat_conversation(request: Request, body: ConversationRequest):
                 trace = turn_span(get_tracer(), thread_id, await next_turn_index(graph, config))
 
             # 五类事件：token（增量文本）/ tool_call / ping（心跳）/ final / error
+            # 外层 HITL 还会出现 interrupt：挂起本轮流后把会话标成 interrupted
+            interrupted = False
             async with trace:
                 async for frame in stream_conversation(
                     graph,
@@ -742,8 +750,13 @@ async def chat_conversation(request: Request, body: ConversationRequest):
                     config,
                     is_disconnected=request.is_disconnected,
                 ):
+                    if frame_type(frame) == "interrupt":
+                        interrupted = True
                     yield frame
-                await set_task_state(thread_id, "completed")
+                if interrupted:
+                    await set_task_state(thread_id, "interrupted", interrupt_time=datetime.now(UTC))
+                else:
+                    await set_task_state(thread_id, "completed")
 
         except ConversationStreamError:
             # error 事件已由 stream_conversation 推送，这里只收尾状态机

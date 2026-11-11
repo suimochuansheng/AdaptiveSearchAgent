@@ -28,6 +28,7 @@ import logging
 import re
 from contextlib import nullcontext
 from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from fastapi import APIRouter, HTTPException, Request
@@ -79,6 +80,18 @@ def approval_payload(request: ApprovalRequest) -> dict[str, Any]:
     return {field: data[field] for field in APPROVAL_FIELDS}
 
 
+def frame_type(frame: str) -> str | None:
+    """取 SSE 帧的 `type`；非标准帧 / 解析失败返回 None（心跳等不影响状态机）。"""
+    try:
+        payload = frame.strip()
+        if not payload.startswith("data: "):
+            return None
+        event = json.loads(payload[len("data: ") :])
+        return event.get("type") if isinstance(event, dict) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def build_interrupt_frame(values_payload: dict[str, Any]) -> str | None:
     """从 LangGraph 的 values chunk 里取外层审批中断，编码成 SSE 帧。
 
@@ -128,6 +141,24 @@ def _langfuse_handler() -> Any:
     from api_main import langfuse_handler
 
     return langfuse_handler
+
+
+_task_state_warned = False
+
+
+async def _set_task_state(
+    thread_id: str, state: str, *, interrupt_time: datetime | None = None
+) -> None:
+    """写 `task_states`；失败只 warning（状态机是旁路，不能阻断审批本身）。"""
+    global _task_state_warned
+    try:
+        from api_main import set_task_state
+
+        await set_task_state(thread_id, state, interrupt_time=interrupt_time)
+    except Exception as exc:  # noqa: BLE001 - 状态机不可用不影响 resume 的安全性
+        if not _task_state_warned:
+            _task_state_warned = True
+            logger.warning("task_states 写入失败（%s），状态机降级为不更新：%s", state, exc)
 
 
 async def _pending_interrupt(graph: Any, config: dict[str, Any]) -> bool:
@@ -208,6 +239,9 @@ async def resume_conversation(  # noqa: C901 - 状态码矩阵按契约逐条展
         ) from exc
 
     # 6) 200 + SSE：用 Command(resume=decision) 续跑同一 thread_id
+    #    running 在"校验/锁/消费都通过、即将驱动恢复"时置；404/409/410 不改状态，
+    #    保持 interrupted 让用户可以重试（不能让失败的 resume 把会话卡成 running）。
+    await _set_task_state(thread_id, "running")
     return StreamingResponse(
         _resume_event_stream(request, graph, config, thread_id, body.decision, lock),
         media_type="text/event-stream",
@@ -234,6 +268,7 @@ async def _resume_event_stream(
             config["callbacks"] = build_callbacks(get_tracer(), _langfuse_handler())
             trace = turn_span(get_tracer(), thread_id, await next_turn_index(graph, config))
 
+        interrupted = False
         async with trace:
             with executor.approval_resume_scope():
                 async for frame in stream_conversation(
@@ -242,13 +277,22 @@ async def _resume_event_stream(
                     config,
                     is_disconnected=request.is_disconnected,
                 ):
+                    if frame_type(frame) == "interrupt":
+                        interrupted = True
                     yield frame
+        if interrupted:
+            # 恢复过程中又命中一次审批：会话重新进入挂起态
+            await _set_task_state(thread_id, "interrupted", interrupt_time=datetime.now(UTC))
+        else:
+            await _set_task_state(thread_id, "completed")
     except ConversationStreamError:
         # error 帧已由 stream_conversation 推送，这里只记录
         logger.exception("恢复后的会话流执行错误（thread_id=%s）", thread_id)
+        await _set_task_state(thread_id, "failed")
     except Exception as exc:  # noqa: BLE001 - 已经 200，只能以 error 帧收尾
         logger.exception("恢复后的会话流异常（thread_id=%s）", thread_id)
         yield f"data: {json.dumps({'type': 'error', 'message': f'服务异常：{exc}'}, ensure_ascii=False)}\n\n"
+        await _set_task_state(thread_id, "failed")
     finally:
         await lock.release()
 
@@ -270,5 +314,6 @@ __all__ = [
     "ResumeRequest",
     "approval_payload",
     "build_interrupt_frame",
+    "frame_type",
     "router",
 ]
