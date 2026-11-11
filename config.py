@@ -161,6 +161,9 @@ class Settings(BaseSettings):
     ENABLE_HITL: bool = False
     # 审批凭据有效期（秒）：契约冻结 10 分钟；验收时临时调 1 秒验证 410
     APPROVAL_TTL_SECONDS: int = 600
+    # ⚠️ 仅评测/演示用，生产禁用：策略判定"需审批"时直接放行（不调 interrupt、不签凭据）。
+    # 默认 False；仅在 G11 基线评测（C 组）显式打开。ENV=prod 时即使设为 True 也忽略并 warning。
+    EVAL_AUTO_APPROVE: bool = False
     # 审批墓碑保留时长（秒）：28 小时内区分“已消费（409）/ 已过期（410）/ 从未存在（404）”
     APPROVAL_TOMBSTONE_TTL_SECONDS: int = 86400
     # MCP 工具热插拔（T9-3）：默认关闭；关时零子进程、零 mcp 导入，注册表恒为 5 个内置工具。

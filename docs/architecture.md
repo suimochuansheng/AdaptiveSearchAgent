@@ -1,8 +1,9 @@
 # 架构一览（六边形 / 端口 / 依赖规则）
 
-> 状态：**T-arch 样板切片已落地（2026-11-11）**。`agent/app/ports.py` 声明 7 个端口
-> 与 `RuntimeEvent`；`agent/adapters/runtime/langgraph_runtime.py` 是**唯一**已实现的
-> 适配器；其余适配器仍是空目录。`src/` **一行未搬**，现网主循环原样复用。
+> 状态：**T-arch 样板切片已落地（2026-11-11）**。`agent/app/ports.py` 声明 8 个端口
+> 与 `RuntimeEvent`；`agent/adapters/runtime/langgraph_runtime.py` 与两个预算账本适配器
+> （`agent/adapters/tools/budget_memory.py` / `budget_redis.py`，G11 起归入端口口径）是
+> 已实现的适配器；其余适配器仍是空目录。`src/` **一行未搬**，现网主循环原样复用。
 >
 > 目标不是全量迁移，而是用一层薄样板把"六边形 / 端口 / 依赖方向"讲清楚、可执行、
 > 可被契约测试打到。全量迁移见文末「被砍项与取舍」。
@@ -56,6 +57,11 @@
 它负责实例化适配器并注入。当前文件尚不存在，`composition-root-only` 规则见
 `docs/pending.md` P2。
 
+## 已知缺陷
+
+- `AgentRuntime.resume` 端口不含审批凭据，P0 只能保证"经 HTTP 路由进入"这一条路径安全（绕过路由直接调端口时，凭据校验不在端口契约内）。
+- `domain` 里不再允许出现 `Protocol`（本轮已把 `BudgetLedger` 迁到端口层，`NoopLedger` 随之下沉到适配器），后续新增接口一律进 `app/ports.py`。
+
 ## 端口清单与实现映射
 
 端口只在 `agent/app/ports.py` 声明（`Protocol` + `@runtime_checkable`，只声明不实现）。
@@ -70,6 +76,7 @@
 | `TaskStore` | `enqueue` / `get` / `update` / `cancel` | 现网 API 内长任务 + Celery worker | 未适配 | 换队列（Celery / Redis Stream）不动用例 |
 | `MemoryStore` | `append` / `recall` / `get_profile` / `upsert_profile` | 现网 `src/memory/` + 画像存储 | 未适配 | 记忆与画像同端口，换库不拆事务 |
 | `EventBus` | `publish` / `subscribe` | 现网 SSE 编码 + tracer 直连 | 未适配 | 观测/前端/审计的扇出方式可换，主循环不改 |
+| `BudgetLedger` | `add` / `snapshot` / `reset` | `MemoryBudgetLedger`（`agent/adapters/tools/budget_memory.py`）/ `RedisBudgetLedger`（`agent/adapters/tools/budget_redis.py`，失败降级 `NoopLedger`） | **已实现** | 换持久化（Redis / 内存 / DB）不动执行器与策略；原声明在 `agent/domain/budget.py`，OI-TAR-002 后迁入端口层 |
 
 **不单独建的两个端口**（有意合并，避免同一模型/用户出现两套口径）：
 

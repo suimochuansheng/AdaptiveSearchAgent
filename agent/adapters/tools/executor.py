@@ -22,6 +22,7 @@
 | `deny` | 直接返回可读理由，**不调用 fn** | 不记 |
 | `require_approval`（HITL 关） | 返回“需人工审批…本次已拒绝”，**不调用 fn** | 不记 |
 | `require_approval`（HITL 开） | 签发 `ApprovalRequest` -> `interrupt()` 挂起；恢复后 approve 执行原工具 / reject 返回可读理由 | 仅 approve 执行后记 |
+| `require_approval`（`EVAL_AUTO_APPROVE=1`） | **仅评测/演示用，生产禁用**：不调 `interrupt`、不签凭据，直接执行；计数 `auto_approved` 并用 warning 打出累计次数。`ENV=prod` 时忽略该开关并 warning（双保险） | 记（与 allow 同路径） |
 
 `require_approval` 的挂起由 G7/T9-2 接入：`ENABLE_HITL=False` 时保持 G5 原行为（同一个
 拒绝字符串，零 IO）；`ENABLE_HITL=True` 且工具策略开启时，在工具函数内部调用
@@ -51,7 +52,7 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.types import interrupt
 
-from agent.domain.budget import BudgetLedger, call_cost
+from agent.domain.budget import call_cost
 from agent.domain.tool_policy import PolicyContext, decide
 from agent.observability.tool_outcome import (
     clear_tool_outcome,
@@ -65,6 +66,7 @@ from src.context_manager import estimate_tokens
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    from agent.app.ports import BudgetLedger
     from agent.domain.budget import BudgetSnapshot
     from agent.domain.roles import ApprovalRequest
     from agent.domain.tool import ToolSpec
@@ -83,10 +85,17 @@ _resume_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
 _scope_warned = False
 _default_ledger: BudgetLedger | None = None
 
+#: 评测专用开关被忽略时只 warning 一次
+_eval_auto_approve_warned = False
+#: 本轮进程内被 EVAL_AUTO_APPROVE 直接放行的调用次数（仅评测统计用）
+_auto_approved = 0
+
 __all__ = [
     "approval_resume_scope",
     "current_scope",
     "get_default_ledger",
+    "reset_auto_approved_count",
+    "auto_approved_count",
     "set_default_ledger",
     "set_scope",
     "tool_scope",
@@ -199,6 +208,36 @@ def set_default_ledger(ledger: BudgetLedger | None) -> None:
     _default_ledger = ledger
 
 
+# ── 评测专用缝：自动放行（默认关；生产禁用） ─────────────────────────
+
+
+def auto_approved_count() -> int:
+    """本进程内被 `EVAL_AUTO_APPROVE` 直接放行的调用次数（仅评测统计用）。"""
+    return _auto_approved
+
+
+def reset_auto_approved_count() -> None:
+    """清零自动放行计数（评测每组开始前调用）。"""
+    global _auto_approved
+    _auto_approved = 0
+
+
+def _eval_auto_approve_enabled() -> bool:
+    """`EVAL_AUTO_APPROVE` 是否生效：默认关；`ENV=prod` 时忽略并 warning（双保险）。"""
+    global _eval_auto_approve_warned
+    if not settings.EVAL_AUTO_APPROVE:
+        return False
+    if settings.ENV.strip().lower() == "prod":
+        if not _eval_auto_approve_warned:
+            _eval_auto_approve_warned = True
+            logger.warning(
+                "EVAL_AUTO_APPROVE 仅在评测/演示环境有效，ENV=prod 下已忽略"
+                "（需审批的工具仍走 HITL / 拒绝分支）"
+            )
+        return False
+    return True
+
+
 # ── 包装 ─────────────────────────────────────────────────────────────
 
 
@@ -237,6 +276,17 @@ def wrap_tool(
 
         decision = decide(spec, ctx, used)
         if decision.kind == "require_approval":
+            if _eval_auto_approve_enabled():
+                # 仅评测/演示用，生产禁用：不调 interrupt、不签凭据，直接执行。
+                # 计数用于回答"这一轮本会触发多少次审批"。
+                global _auto_approved
+                _auto_approved += 1
+                logger.warning(
+                    "【评测专用】EVAL_AUTO_APPROVE=1，自动放行需审批工具 %s（累计 %d 次；生产禁用）",
+                    spec.name,
+                    _auto_approved,
+                )
+                return await _execute_and_record(fn, spec, args, kwargs, active=active, scope=scope)
             if not settings.ENABLE_HITL:
                 # G5 原行为：返回可读拒绝理由，不调用 fn、不记账；只补结果码给追踪
                 logger.info(

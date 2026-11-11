@@ -196,3 +196,48 @@ poetry run python evals/agent_quality.py --label baseline_raw
 
 > 报告默认带 `<commit>_<YYYYmmdd-HHMM>` 时间戳，同 label 复跑不互相覆盖；
 > 判定沿用脚本 `--max-drop 2.0`（与 `--compare` 基线比较），换裁判则分数不可横比。
+
+## 8. Agent 能力基线 v2（G11：四能力三组对照，同裁判同题）
+
+> **口径**：与 §7 完全一致——同一份 `evals/agent_quality.py` 默认题集（20 题，
+> `evals/datasets/qa_dataset_v3.yaml`，sha256 `367f35c1ec11…`）、同一入口
+> `POST /chat/conversation`、同一裁判 `qwen3.8-max-0902`（`temperature=0`）、
+> `--concurrency 1`、`DEEP_RESEARCH_BACKEND=workflow`（未用 stub）。
+> 三组只改四个能力开关：A 组"全关"复现改造前，B 组开治理（工具策略 + 追踪），C 组再加 HITL。
+> 被测 commit `24a916c`（G11 改动未提交，工作区 dirty）；每组一个独立后端进程，跑完即换，
+> 服务启动时把开关作为环境变量注入（快照见下表最后一列）。
+
+| 组别 | 均分 | 有效/失败 | 分布（10/9/8/7/<=6） | 平均耗时 | 平均工具调用 | 本会触发审批次数 | flag 快照 |
+|---|---|---|---|---|---|---|---|
+| A 全关（复现 raw） | **9.70** | 20/0 | 17/1/1/1/0 | 30.3s | 1.00 | 0 | `TOOL_POLICY=0 TRACE=0 HITL=0 MCP=0 EVAL_AUTO_APPROVE=0` |
+| B 治理开（审批/MCP 关） | **9.75** | 20/0 | 16/3/1/0/0 | 29.6s | 1.00 | 0 | `TOOL_POLICY=1 TRACE=1 HITL=0 MCP=0 EVAL_AUTO_APPROVE=0` |
+| C 治理+HITL（自动放行） | **9.85** | 20/0 | 18/1/1/0/0 | 29.7s | 1.00 | 0（20 题未触发；探针放行 1 次，不计入表） | `TOOL_POLICY=1 TRACE=1 HITL=1 MCP=0 EVAL_AUTO_APPROVE=1` |
+
+**与 §7（raw，9.65）的差异与结论**
+
+- A 9.70 与 raw 9.65 差 **+0.05**（阈值 0.3 以内）→ **治理未降质**：A 组四能力全关，
+  与 §7 同一代码路径、同一裁判、同题集，差异只来自裁判的单题 ±1 分波动；
+- B 9.75（+0.10）、C 9.85（+0.20）同样在阈值内；三组均 0 失败题、0 SSE `error`，
+  平均工具调用恒为 1.00（每题只调一次 `search_knowledge`），说明四能力接线没有改变工具选择行为。
+- A/B/C 之间的小分摆动集中在 q005/q011/q013/q014/q018 这 5 题（同一工具 `search_knowledge`、
+  同一答案路径，仅裁判给分 ±1），属 §4 记录的裁判波动，不是能力差异。
+
+**审批链路的代价（C 组 vs B 组）**
+
+- 均分差 **+0.10**、平均耗时差 **+0.1s/题**（29.7s vs 29.6s），都在裁判波动与进程噪声内；
+- **本轮 20 题没有任何一题调用 `deep_research`（唯一 `requires_approval=True` 的工具）**，
+  所以 C 组 `auto_approved=0`、上表"本会触发审批次数"为 0——审批分支没有真正进入，
+  这 0.10 分 / 0.1s 是"HITL 接线开销 + 裁判波动"，**不是审批执行成本**；
+- 为证明自动放行链路真的生效，C 组后端另发 1 次 `deep_research` 探针请求
+  （`thread_id=g11-probe-hitl`，不计入 20 题统计）：服务日志出现
+  `【评测专用】EVAL_AUTO_APPROVE=1，自动放行需审批工具 deep_research（累计 1 次；生产禁用）`，
+  SSE 正常收尾、未挂起等审批；`ENV=prod` 下同一开关被忽略（见 `T95-基线v2/g11_checks.py`）。
+
+**报告文件（三份 JSON 的 `judge_model` 均为 `qwen3.8-max-0902`）**
+
+- A：`文档/项目/AdaptiveSearchAgent/评测报告/agent_eval_G11_A_off_24a916c_20261111-2300.json`
+- B：`文档/项目/AdaptiveSearchAgent/评测报告/agent_eval_G11_B_governance_24a916c_20261111-2310.json`
+- C：`文档/项目/AdaptiveSearchAgent/评测报告/agent_eval_G11_C_hitl_24a916c_20261111-2323.json`
+
+> 复跑命令见 `tests/test_agent_cases/T95-基线v2/交接单.md`；A 组即"全关复现改造前"，
+> 与 §7 可直接横比；换裁判则三组都不可横比（脚本会打印实际裁判名并写进 JSON）。

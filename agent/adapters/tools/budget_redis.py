@@ -17,7 +17,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
-from agent.domain.budget import BudgetSnapshot, NoopLedger
+from agent.adapters.tools.budget_memory import NoopLedger
+from agent.app.ports import BudgetLedger
+from agent.domain.budget import BudgetSnapshot
 from config import settings
 
 if TYPE_CHECKING:
@@ -33,7 +35,7 @@ _TTL_SECONDS = 24 * 60 * 60
 __all__ = ["NoopLedger", "RedisBudgetLedger"]
 
 
-class RedisBudgetLedger:
+class RedisBudgetLedger(BudgetLedger):
     """Redis 版账本；所有方法都是异步的，失败自动降级为空操作。"""
 
     def __init__(

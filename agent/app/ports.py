@@ -1,6 +1,6 @@
 """端口（Port）契约：六边形架构的"里侧接口"。
 
-本文件**只声明、不实现**：7 个 `Protocol` + 1 个纯数据 `RuntimeEvent`。
+本文件**只声明、不实现**：8 个 `Protocol` + 1 个纯数据 `RuntimeEvent`。
 应用层（`agent/app`）只依赖这些抽象；谁提供实现由适配器决定，换实现只换适配器
 （组合根负责装配），应用层一行不改。
 
@@ -21,11 +21,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
+
+    from agent.domain.budget import BudgetSnapshot
 
 __all__ = [
     "AgentRuntime",
     "ArtifactStore",
+    "BudgetLedger",
     "EventBus",
     "MemoryStore",
     "ModelClient",
@@ -314,4 +317,46 @@ class EventBus(Protocol):
 
     def subscribe(self, *kinds: str) -> AsyncIterator[RuntimeEvent]:
         """订阅事件流；`kinds` 为空表示全部六值。"""
+        ...
+
+
+@runtime_checkable
+class BudgetLedger(Protocol):
+    """工具预算账本端口：策略只读 `snapshot`，执行器只写 `add`。
+
+    原声明在 `agent/domain/budget.py`（OI-TAR-002）；`domain` 只放纯数据 / 纯规则，
+    凡是"需要实现方"的接口一律进本文件，`domain` 里不再允许出现 `Protocol`。
+
+    方法可以是**同步**（内存实现）或**异步**（Redis 实现），执行器用
+    `inspect.isawaitable` 统一收口；返回值注解写成 `T | Awaitable[T]` 就是为了让
+    两种实现都满足端口类型。
+
+    契约要点：
+
+    - **幂等性**：`add` **不幂等**（每次调用都累加，重复投递会多记），去重是调用方
+      的职责；`reset` 幂等（清空不存在的作用域不报错）。
+    - **错误语义**：存储不可用**不得**把异常抛给工具调用（记账失败只降级/告警，
+      工具结果照常返回）；读 `snapshot` 失败时允许退化为全 0 快照——预算模块坏掉
+      不能拖垮会话。
+    - **并发安全**：同一 `scope` 的并发 `add` 允许 **±1 次调用**误差（读快照 -> 决策
+      -> 记账整体不是原子的）；`reset` 与 `add` 并发时结果不保证，调用方需串行化。
+    """
+
+    def add(
+        self,
+        scope: str,
+        *,
+        calls: int = 0,
+        cost: float = 0.0,
+        tokens: int = 0,
+    ) -> None | Awaitable[None]:
+        """把一次调用的消耗累加进 `scope`。"""
+        ...
+
+    def snapshot(self, scope: str) -> BudgetSnapshot | Awaitable[BudgetSnapshot]:
+        """读 `scope` 当前已消耗的预算。"""
+        ...
+
+    def reset(self, scope: str) -> None | Awaitable[None]:
+        """清空 `scope` 的累计值（换轮 / 换会话时用）。"""
         ...
