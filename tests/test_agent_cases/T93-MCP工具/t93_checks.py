@@ -16,7 +16,7 @@
     A6  杀掉 Server 再调：可读"不可用"错误，同一会话其它工具照常可用
     A7  Server 启动失败（命令改 false）：一条 warning、启动继续、5 个内置可用
     A8  关开关重启（全新子进程）：回到 5 个、无残留、无子进程
-    B1  pytest 223 passed / collect 227-231 / nodeids 哈希不变
+    B1  pytest / collect / nodeids 与 `docs/baseline.md` §2 一致（不再硬编码数字）
     B2  原 5 个工具 schema 哈希不变（新增不改旧）
     B3  lint-imports 3 kept；pyproject.toml、poetry.lock 零改动
     B4  未改 src/tools/*、frontend/、hitl.py、approval_store.py
@@ -32,7 +32,7 @@
     1 = A/B 至少一项失败
 
 为什么不是 `test_*.py`：
-    会被 pytest 收集，`--collect-only` 从 227/231 变成 227+N，
+    会被 pytest 收集，`--collect-only` 的收集数改变，
     `docs/baseline.md` §2 的 nodeids 哈希失效（见 tests/test_agent_cases/README.md）。
 
 只读承诺：
@@ -64,6 +64,12 @@ REPO = Path(__file__).resolve().parents[3]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+#: 卡级基线（pytest 通过数 / 收集数 / nodeids）唯一来源：`docs/baseline.md` §2。
+CASE_ROOT = Path(__file__).resolve().parents[1]
+if str(CASE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CASE_ROOT))
+
+import _baseline  # noqa: E402
 from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: E402
 
 from agent.adapters.tools import mcp_client, registry  # noqa: E402
@@ -85,11 +91,6 @@ EXPECTED_NAMES_WITH_MCP = BASELINE_NAMES + NEW_TOOLS
 
 #: 本卡开工 HEAD（交接单第 1 节）：所有"零改动"类断言都拿它当基准
 BASELINE_COMMIT = "7d02f24"
-#: `pytest --collect-only -q` 后 `.pytest_cache/v/cache/nodeids`（228 行）
-NODEIDS_SHA256 = "a57008dd1a22cb16ff5096dda448dcee641f266ce63786dc96eb7bfe25657334"
-NODEIDS_LINES = 228
-EXPECTED_PASSED = 223
-EXPECTED_COLLECT = "227/231"
 
 #: 契约 `ToolSpec` 九字段（docs/contracts/tool-spec.md §1，顺序即 dataclass 顺序）
 CONTRACT_FIELDS = [
@@ -369,7 +370,8 @@ def check_b5() -> bool:
 
 
 def check_b1() -> bool:
-    """B1：pytest 223 passed / collect 227-231 / nodeids 哈希不变。"""
+    """B1：pytest 通过数 / 收集数 / nodeids 与 `docs/baseline.md` §2 一致。"""
+    exp = _baseline.expected()
     collect = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q"],
         cwd=REPO,
@@ -407,17 +409,19 @@ def check_b1() -> bool:
     passed = int(passed_match.group(1)) if passed_match else -1
     ok = (
         full.returncode == 0
-        and passed == EXPECTED_PASSED
+        and passed == exp["pytest_passed"]
         and collect.returncode == 0
-        and EXPECTED_COLLECT in collect_line
-        and node_hash == NODEIDS_SHA256
-        and node_lines == NODEIDS_LINES
+        and exp["collect"] in collect_line
+        and node_hash == exp["nodeids_sha256"]
+        and node_lines == exp["nodeids_lines"]
     )
     detail = (
         f"pytest 末行「{tail}」；collect「{collect_line}」；"
-        f"nodeids {node_lines} 行 sha256={node_hash[:8]}…（基线 {NODEIDS_SHA256[:8]}…）"
+        f"nodeids {node_lines} 行 sha256={node_hash[:8]}…"
+        f"（baseline.md: {exp['pytest_passed']} passed / {exp['collect']} / "
+        f"{exp['nodeids_lines']} 行 / {exp['nodeids_sha256'][:8]}…）"
     )
-    return record("T93-009", "B1 pytest/收集数/nodeids 哈希不变", ok, detail)
+    return record("T93-009", "B1 pytest/收集数/nodeids 与 baseline.md 一致", ok, detail)
 
 
 # ── A 类：热插拔 ──────────────────────────────────────────────────────
