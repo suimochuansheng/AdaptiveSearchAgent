@@ -138,7 +138,20 @@ async def _run_deep_research(query: str) -> str:
     return report
 
 
-# ── 工具列表：模型每轮只能从这 5 个工具里选（单一事实源：tools/registry.py）──
+# ── 工具列表：模型每轮只能从注册表里的工具里选（单一事实源：tools/registry.py）──
+
+
+def current_tools() -> list[Callable[..., Any]]:
+    """按**当前**注册表返回工具列表（T9-3：MCP 工具热注册后重建图即可见）。
+
+    每次调用都重新读 `registry.to_lc_tools()`，所以“注册 → reset 图 → 重建”之后，
+    `bind_tools` / `ToolNode` 拿到的是新列表；不要再用模块级 `TOOLS` 快照。
+    """
+    return registry.to_lc_tools()
+
+
+# deprecated：模块导入时求值一次的快照，MCP 工具热注册后**不会**更新。
+# 仅为兼容旧调用方（`scripts/smoke_tools_schema.py` 等）保留；新代码请用 `current_tools()`。
 TOOLS: list[Callable[..., Any]] = registry.to_lc_tools()
 
 # ── System Prompt（稳定区：角色 + 工具索引 + 判断规则，阶段 B 会做预算管理）──
@@ -186,13 +199,15 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
         checkpointer: 传入后支持多轮会话（同一 thread_id 的消息自动追加）
                      与中断恢复；不传则为无状态单轮模式。
     """
+    # 每次建图都读当前注册表：MCP 工具热注册后重建图即可见（T9-3）
+    tools = current_tools()
     model = ChatOllama(
         model=settings.ollama_model_name,
         base_url=settings.ollama_base_url,
         temperature=0,
         # 显式钉住窗口：不设时由 Ollama 模型默认值决定，阶段 B 的预算分层就没有锚点
         num_ctx=settings.ollama_num_ctx,
-    ).bind_tools(TOOLS)
+    ).bind_tools(tools)
 
     async def agent_node(state: ConversationState, config: RunnableConfig) -> dict:
         # 每轮重新注入稳定区（system），旧轮次压成摘要，最近轮次保留原文
@@ -250,7 +265,7 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
 
         return update
 
-    tool_node = ToolNode(TOOLS)
+    tool_node = ToolNode(tools)
 
     async def tools_node(state: ConversationState, config: RunnableConfig) -> dict:
         """执行工具，并把结果收口到 prompt 预算内（超预算压缩，超大落盘 + 指针）。"""
@@ -279,7 +294,7 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     logger.info(
         "Conversation agent graph built",
-        extra={"tools": [t.__name__ for t in TOOLS], "model": settings.ollama_model_name},
+        extra={"tools": [t.__name__ for t in tools], "model": settings.ollama_model_name},
     )
     return compiled
 

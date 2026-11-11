@@ -277,6 +277,8 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(clean_interrupted_tasks())
     async_maintenance_task = asyncio.create_task(maintain_async_tasks_loop())
     logger.info("后台清理任务已启动")
+    # 3. MCP 工具热插拔（T9-3）：默认关闭；失败只 warning，不阻塞启动
+    await _register_mcp_tools()
     logger.info("FastAPI 启动完成")
 
     yield  #  FastAPI 应用启动时从开头执行到这里，关闭时从这里继续执行到末尾
@@ -297,7 +299,13 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             logger.info("异步任务维护已取消")
 
-    # 2. 关闭数据库和 Redis 连接
+    # 2. 关闭 MCP 子进程（T9-3）：没开开关 / 没连上时是 no-op
+    if settings.ENABLE_MCP:
+        from agent.adapters.tools.mcp_client import close_mcp_session
+
+        await close_mcp_session()
+
+    # 3. 关闭数据库和 Redis 连接
     await close_checkpointer()
     await redis_client.close()
     logger.info("FastAPI 关闭")
@@ -711,6 +719,51 @@ async def get_conversation_graph():
         saver = get_checkpointer()
         _conversation_graph = build_conversation_graph(checkpointer=saver)
     return _conversation_graph
+
+
+def reset_conversation_graph() -> None:
+    """丢弃缓存的会话图（T9-3：MCP 工具热注册后，下一次请求重建图就能看到新工具）。"""
+    global _conversation_graph
+    _conversation_graph = None
+
+
+async def _register_mcp_tools() -> None:
+    """启动阶段加载 MCP Server 的工具并热注册（T9-3）。
+
+    只有 `ENABLE_MCP=True` 才会走到这里。失败（命令错 / 握手超时 / Server 不认协议）
+    **只 warning 一次、不抛异常**：内置 5 个工具照常可用，注册表保持原状。
+    """
+    if not settings.ENABLE_MCP:
+        return
+
+    import shlex
+
+    from agent.adapters.tools.mcp_client import load_mcp_tools
+    from agent.adapters.tools.registry import register
+
+    try:
+        items = await load_mcp_tools(
+            settings.MCP_SERVER_CMD,
+            shlex.split(settings.MCP_SERVER_ARGS),
+            timeout=settings.MCP_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001 - 启动阶段的外部依赖失败不能拖垮服务
+        logger.warning("MCP 工具加载失败，本次启动只提供内置工具：%s", exc)
+        return
+
+    registered: list[str] = []
+    for tool_spec, fn in items:
+        try:
+            register(tool_spec.name, fn, tool_spec)
+        except ValueError as exc:  # 重名由注册表拦截：跳过它，别让整批工具都注册不上
+            logger.warning("跳过 MCP 工具 %s：%s", tool_spec.name, exc)
+            continue
+        registered.append(tool_spec.name)
+
+    if registered:
+        # 图是单例缓存：不重置的话模型下一轮仍然只看到旧工具（OI-P-006）
+        reset_conversation_graph()
+        logger.info("MCP 工具已热注册：%s", registered)
 
 
 @app.post("/chat/conversation")

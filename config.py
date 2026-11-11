@@ -163,6 +163,16 @@ class Settings(BaseSettings):
     APPROVAL_TTL_SECONDS: int = 600
     # 审批墓碑保留时长（秒）：28 小时内区分“已消费（409）/ 已过期（410）/ 从未存在（404）”
     APPROVAL_TOMBSTONE_TTL_SECONDS: int = 86400
+    # MCP 工具热插拔（T9-3）：默认关闭；关时零子进程、零 mcp 导入，注册表恒为 5 个内置工具。
+    # 开启后启动阶段连 stdio MCP Server，把远端工具登记进注册表并重建会话图。
+    ENABLE_MCP: bool = False
+    # stdio 子进程命令与参数（参数按 shell 规则拆分，支持 "--flag value" 这种写法）
+    MCP_SERVER_CMD: str = "python"
+    MCP_SERVER_ARGS: str = "scripts/mcp_server.py"
+    # 握手 / tools/list / tools/call 的单次超时（秒）
+    MCP_TIMEOUT_SECONDS: float = 10.0
+    # MCP 工具单次输出上限（token，进 ToolSpec 供预算使用）
+    MCP_MAX_OUTPUT_TOKENS: int = 2000
     # span 落盘目录（每 span 一行 JSON：<TRACE_DIR>/<YYYY-MM-DD>.jsonl）；logs/ 已被 gitignore
     TRACE_DIR: str = "logs/trace"
     # 单轮工具调用上限（达到后本轮后续调用直接拒绝）
