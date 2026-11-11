@@ -44,7 +44,16 @@
 | `approval` | 一次审批等待（从弹卡到恢复/超时） | 工具名 | `turn` |
 <!-- /t12:enum TraceSpan.kind -->
 
-## 3. `attrs` 白名单（通用六键 + turn 专用两键）
+## 3. `attrs` 白名单（按 kind 分两支）
+
+白名单按 `kind` 分两支（v2）：
+
+1. **非 turn**（`llm` / `tool` / `compress` / `offload` / `approval`）：严格六键
+   `tool / tokens_in / tokens_out / cost / error_kind / approval_id`，多一个键都丢弃。
+2. **turn**（根 span）：六键之外**额外允许** `tools: string[]`、`span_count: int`
+   （一轮汇总专用），其余键仍不许加。
+
+通用六键：
 
 <!-- t12:keys TraceSpan.attrs -->
 | 键 | 类型 | 说明 |
@@ -123,4 +132,4 @@
 | 日期 | 版本 | 变更 | 依据 |
 |---|---|---|---|
 | 2026-11-11 | v1 | 冻结十字段、六 kind、六 attrs 白名单与 `logs/trace/<date>.jsonl` 落盘口径 | T1-2；主文档 2.4.2；T7-0 卡面 |
-| 2026-11-11 | v2 | 仅 `kind="turn"` 增加汇总键 `tools` / `span_count`（其余五 kind 仍严格六键）；明确不设 `status` 字段、错误由 `attrs.error_kind` 表达；明确 `turn_index=1` = 会话第一轮 | T7-0 验收裁决 |
+| 2026-11-11 | v2 | 仅 `kind="turn"` 增加汇总键 `tools` / `span_count`（其余五 kind 仍严格六键）；明确不设 `status` 字段、错误由 `attrs.error_kind` 表达；明确 `turn_index=1` = 会话第一轮 | 触发卡 T7-0；裁决人 计划窗口 |
