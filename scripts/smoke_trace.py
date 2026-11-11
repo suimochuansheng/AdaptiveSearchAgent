@@ -49,6 +49,7 @@ from agent.observability.tracer import (
     SPAN_ATTRS,
     SPAN_KINDS,
     TRACE_FIELDS,
+    TURN_ONLY_ATTRS,
     SpanHandle,
     Tracer,
     get_tracer,
@@ -211,15 +212,38 @@ def assert_fields(records: list[dict[str, Any]]) -> None:
     bad_kinds = [rec["kind"] for rec in records if rec["kind"] not in SPAN_KINDS]
     check("kind ∈ 六枚举", not bad_kinds, f"kinds={sorted({rec['kind'] for rec in records})}")
 
-    # turn 根 span 额外承载本轮汇总 tools/span_count（卡面要求，v1 白名单之外）
-    turn_extras = {"tools", "span_count"}
+    # v2：turn 根 span 额外承载本轮汇总 tools/span_count；其余五 kind 严格六键
     violations: list[tuple[str, list[str]]] = []
     for rec in records:
-        allowed = SPAN_ATTRS | (turn_extras if rec["kind"] == "turn" else set())
+        allowed = SPAN_ATTRS | (TURN_ONLY_ATTRS if rec["kind"] == "turn" else frozenset())
         extra = sorted(set(rec["attrs"]) - allowed)
         if extra:
             violations.append((rec["kind"], extra))
-    check("attrs 键 ⊆ 白名单（turn 的汇总键按卡面放行）", not violations, str(violations[:3]))
+    check(
+        "attrs 键合规（turn 两汇总键为 v2 允许，其余严格六键）", not violations, str(violations[:3])
+    )
+
+    bad_turn_types: list[str] = []
+    for rec in records:
+        if rec["kind"] != "turn":
+            continue
+        tools = rec["attrs"].get("tools")
+        count = rec["attrs"].get("span_count")
+        if not (isinstance(tools, list) and all(isinstance(item, str) for item in tools)):
+            bad_turn_types.append(f"tools={tools!r}")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            bad_turn_types.append(f"span_count={count!r}")
+    check(
+        "turn 汇总键类型 tools: string[] / span_count: int", not bad_turn_types, str(bad_turn_types)
+    )
+
+    allowed_error_kinds = {"transient", "llm_recoverable", "user_fixable", "fatal"}
+    bad_error_kinds = [
+        rec["attrs"]["error_kind"]
+        for rec in records
+        if rec["attrs"].get("error_kind") not in (None, *allowed_error_kinds)
+    ]
+    check("error_kind ∈ 四类（空 = 成功）", not bad_error_kinds, str(bad_error_kinds))
 
     bad_time = []
     for rec in records:

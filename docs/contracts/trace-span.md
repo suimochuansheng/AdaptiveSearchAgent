@@ -1,12 +1,13 @@
 # 契约 · TraceSpan（链路追踪 span）
 
-> 卡：**T1-2（G3 契约冻结）** ｜ 状态：**v1 已冻结（2026-11-11）** ｜ 本文件：`docs/contracts/trace-span.md`
+> 卡：**T1-2（G3 契约冻结）** ｜ 状态：**v2 已冻结（2026-11-11）** ｜ 本文件：`docs/contracts/trace-span.md`
 > 上游依据：《Agent 架构设计定稿主文档》2.4.2；修订文件 T7-0 卡面
 > 消费方：`agent/observability/tracer.py`（T7-0 `JsonlTracer`）、`agent/observability/event_tap.py`（T7-0）、
 > `scripts/smoke_trace.py`（T7-0）、`docs/baseline.md §7`（T9-5 费用归因）
 >
-> **变更规则**：字段、`kind` 枚举、`attrs` 白名单冻结。确需改动必须新开
-> `docs/revisions/YYYY-MM-DD-<主题>.md`，由计划窗口升 v2 并同步代码与 `t12_checks.py`。
+> **变更规则**：字段、`kind` 枚举、`attrs` 白名单冻结。v1 的十字段 / 六 kind / 六键白名单保持不变；
+> **v2 只对 `kind="turn"` 放行两个汇总键**（`tools` / `span_count`），其余五个 kind 仍严格六键。
+> 确需再改必须新开 `docs/revisions/YYYY-MM-DD-<主题>.md`，由计划窗口升 v3 并同步代码与 `t12_checks.py`。
 >
 > **机读锚点**：`<!-- t12:... -->` 注释块由 `tests/test_agent_cases/T12-契约冻结/t12_checks.py` 比对。
 
@@ -22,7 +23,7 @@
 | `span_id` | `str` | 是 | span 唯一 id（32 位 hex）；同一行内不复用 | 父子关联 |
 | `parent_span_id` | `str \| None` | 是 | 父 span id；`kind="turn"` 为 `null`（本轮根） | 重建 span 树 |
 | `session_id` | `str` | 是 | 会话 id（= `thread_id`） | 按会话聚合费用 |
-| `turn_index` | `int` | 是 | 会话内第几轮，**从 1 开始**，同会话单调递增 | 对齐 SSE 轮次 |
+| `turn_index` | `int` | 是 | 会话内第几轮，**从 1 开始（1 = 会话第一轮）**，同会话单调递增 | 对齐 SSE 轮次 |
 | `name` | `str` | 是 | 工作单元名：`turn` / 模型名 / 工具名 / `compress` / `offload` / 工具名（审批） | 展示、按名称聚合 |
 | `kind` | `str` | 是 | 六值枚举，见 §2 | 分类统计 |
 | `start` | `str` | 是 | 开始时刻，ISO 8601 带偏移、毫秒精度（`2026-11-11T00:31:02.114+08:00`） | 耗时计算 |
@@ -43,7 +44,7 @@
 | `approval` | 一次审批等待（从弹卡到恢复/超时） | 工具名 | `turn` |
 <!-- /t12:enum TraceSpan.kind -->
 
-## 3. `attrs` 白名单（只有这六个键）
+## 3. `attrs` 白名单（通用六键 + turn 专用两键）
 
 <!-- t12:keys TraceSpan.attrs -->
 | 键 | 类型 | 说明 |
@@ -56,8 +57,25 @@
 | `approval_id` | `str` | 审批 span 关联的 `ApprovalRequest.approval_id` |
 <!-- /t12:keys TraceSpan.attrs -->
 
-**白名单之外不许加键**：想记新东西（如 `model`、`cached`、`candidates`）必须先升 v2——否则
-G6/T7-0 与 G11/T9-5 的字段核对会失配。
+**`kind="turn"` 专用汇总键（v2 新增，只对根 span 开口）**
+
+<!-- t12:keys TraceSpan.attrs.turn -->
+| 键 | 类型 | 说明 |
+|---|---|---|
+| `tools` | `string[]` | 本轮工具调用名列表（按调用发生顺序；无工具为 `[]`） |
+| `span_count` | `int` | 本轮 span 总数（含 `turn` 根自身） |
+<!-- /t12:keys TraceSpan.attrs.turn -->
+
+- **只有 `kind="turn"` 可以带这两个键**；`llm` / `tool` / `compress` / `offload` / `approval`
+  仍严格六键白名单，多一个键都必须丢弃（`JsonlTracer` 已按此实现）。
+- `turn` 的 `attrs` 里同样可以有通用六键（如 `tokens_in` / `tokens_out` / `cost` / `error_kind`）。
+
+**错误语义**：本契约**不设 `status` 字段**。失败由 `attrs.error_kind` 表达：
+为空 = 成功；非空取四类之一 `transient` / `llm_recoverable` / `user_fixable` / `fatal`。
+同一语义不两处表达（内存句柄的 `status` 仅供运行时使用，不落盘）。
+
+**白名单之外不许加键**：`kind="turn"` 的 `tools` / `span_count` 是 v2 的唯一例外；想记新东西
+（如 `model`、`cached`、`candidates`）必须先升 v3——否则 G6/T7-0 与 G11/T9-5 的字段核对会失配。
 
 ## 4. 落盘
 
@@ -83,10 +101,13 @@ G6/T7-0 与 G11/T9-5 的字段核对会失配。
 
 1. 字段恒为十个：`trace_id / span_id / parent_span_id / session_id / turn_index / name / kind / start / end / attrs`。
 2. `kind` 恒为六值；不得新增 `retrieval` / `rerank` / `memory` 之类。
-3. `attrs` 只允许 §3 六个键；不得塞入 `messages`、`args`、`answer` 等正文。
+3. `attrs` 只允许 §3 六个通用键；**唯一例外**：`kind="turn"` 可另带 `tools` / `span_count`。
+   不得塞入 `messages`、`args`、`answer` 等正文。
 4. 只写 `logs/trace/<date>.jsonl`；**不写业务表、不写 checkpoint**。
 5. `turn` span 的 `parent_span_id` 必须为 `null`；其余 span 的父 id 必须能在同一文件里找到。
 6. 追踪是旁路：关 flag 行为零差异，写入失败不得让本轮失败。
+7. 本契约**不设 `status` 字段**：成功 = `attrs.error_kind` 为空；失败 = 非空（四类之一）。
+8. `turn_index` 从 **1** 开始，`1` = 会话第一轮；仅取不到状态时允许兜底 `0`（不写正常路径）。
 
 ## 7. 谁消费它
 
@@ -102,3 +123,4 @@ G6/T7-0 与 G11/T9-5 的字段核对会失配。
 | 日期 | 版本 | 变更 | 依据 |
 |---|---|---|---|
 | 2026-11-11 | v1 | 冻结十字段、六 kind、六 attrs 白名单与 `logs/trace/<date>.jsonl` 落盘口径 | T1-2；主文档 2.4.2；T7-0 卡面 |
+| 2026-11-11 | v2 | 仅 `kind="turn"` 增加汇总键 `tools` / `span_count`（其余五 kind 仍严格六键）；明确不设 `status` 字段、错误由 `attrs.error_kind` 表达；明确 `turn_index=1` = 会话第一轮 | T7-0 验收裁决 |

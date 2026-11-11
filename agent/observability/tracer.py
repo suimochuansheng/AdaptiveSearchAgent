@@ -35,13 +35,16 @@ logger = logging.getLogger(__name__)
 #: 契约 §2：kind 六值（冻结）
 SPAN_KINDS: frozenset[str] = frozenset({"turn", "llm", "tool", "compress", "offload", "approval"})
 
-#: 契约 §3：attrs 白名单（冻结）
+#: 契约 §3：通用 attrs 白名单（冻结六键）
 SPAN_ATTRS: frozenset[str] = frozenset(
     {"tool", "tokens_in", "tokens_out", "cost", "error_kind", "approval_id"}
 )
 
-#: turn 根 span 的汇总键（T7-0 卡面要求；v1 白名单之外，交接单已登记）
-TURN_ATTRS: frozenset[str] = SPAN_ATTRS | {"tools", "span_count"}
+#: 契约 §3 v2：只对 kind="turn" 放行的汇总键（其余五 kind 仍严格六键）
+TURN_ONLY_ATTRS: frozenset[str] = frozenset({"tools", "span_count"})
+
+#: turn 根 span 可用的全部 attrs 键
+TURN_ATTRS: frozenset[str] = SPAN_ATTRS | TURN_ONLY_ATTRS
 
 #: 契约 §1：十字段（顺序即落盘顺序）
 TRACE_FIELDS: tuple[str, ...] = (
@@ -295,11 +298,28 @@ class JsonlTracer:
     def _drop_illegal_attrs(self, h: SpanHandle) -> None:
         allowed = TURN_ATTRS if h.kind == "turn" else SPAN_ATTRS
         extra = set(h.attrs) - allowed
-        if not extra:
-            return
-        for key in extra:
-            h.attrs.pop(key, None)
-        self._warn_once(f"span {h.name!r} attrs 越界已丢弃: {sorted(extra)}")
+        if extra:
+            for key in extra:
+                h.attrs.pop(key, None)
+            self._warn_once(f"span {h.name!r} attrs 越界已丢弃: {sorted(extra)}")
+        if h.kind == "turn":
+            self._drop_bad_turn_types(h)
+
+    def _drop_bad_turn_types(self, h: SpanHandle) -> None:
+        """v2 只对 turn 开口，但类型必须对：`tools: string[]` / `span_count: int`。"""
+        bad: list[str] = []
+        if "tools" in h.attrs:
+            tools = h.attrs["tools"]
+            if not (isinstance(tools, list) and all(isinstance(item, str) for item in tools)):
+                h.attrs.pop("tools", None)
+                bad.append("tools")
+        if "span_count" in h.attrs:
+            count = h.attrs["span_count"]
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                h.attrs.pop("span_count", None)
+                bad.append("span_count")
+        if bad:
+            self._warn_once(f"span {h.name!r} turn 汇总键类型不合法已丢弃: {bad}")
 
     def _append(self, h: SpanHandle) -> None:
         if self._broken:

@@ -121,6 +121,8 @@ TRACE_FIELDS = [
 ]
 SPAN_KINDS = ["turn", "llm", "tool", "compress", "offload", "approval"]
 SPAN_ATTRS = ["tool", "tokens_in", "tokens_out", "cost", "error_kind", "approval_id"]
+#: v2：只对 kind="turn" 放行的汇总键（其余五 kind 仍严格 SPAN_ATTRS）
+TURN_ATTRS = ["tools", "span_count"]
 
 HISTORY_MARKER = "<!-- t12:history -->"
 TOKEN_WORD = re.compile(r"(?<!\w)token(?!\w)")
@@ -400,6 +402,20 @@ def check_trace_span() -> str:
     )
 
 
+def check_trace_span_turn_attrs() -> str:
+    """v2：turn 专用汇总键、status 不落盘、turn_index 从 1 开始。"""
+    text = _md("trace-span.md")
+    turn_attrs = _require_block(text, "keys", "TraceSpan.attrs.turn")
+    assert turn_attrs == TURN_ATTRS, f"turn 汇总键不一致: {turn_attrs}"
+    assert 'kind="turn"' in text, "缺“只对 kind=turn 开口”的约束"
+    assert "不设 `status` 字段" in text, "缺“不设 status 字段”的说明"
+    assert "1 = 会话第一轮" in text, "缺 turn_index 从 1 开始的说明"
+    return (
+        f"v2：仅 kind=turn 放行 {turn_attrs}；status 不落盘（错误看 error_kind）；"
+        "turn_index 1 = 会话第一轮"
+    )
+
+
 def check_domain_no_framework() -> str:
     """`agent/domain/*.py` 零框架依赖（import-linter 的同口径前置验证）。"""
     forbidden = ("langchain", "langgraph")
@@ -466,6 +482,7 @@ CHECKS: list[tuple[str, str, Callable[[], str]]] = [
     ("T12-013", "TraceSpan 十字段/六 kind/六 attrs", check_trace_span),
     ("T12-014", "agent/domain 零框架依赖", check_domain_no_framework),
     ("T12-015", "台账 不少于 48 行 15 列 + 0a/0b 落位", check_ledger_rows),
+    ("T12-016", "TraceSpan v2 turn 汇总键 + status/turn_index 口径", check_trace_span_turn_attrs),
 ]
 
 
