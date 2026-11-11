@@ -20,9 +20,18 @@
 | 超时 | 返回 `工具执行超时（>Xs），已终止`，不抛栈 | **照记 1 次**（钱已经花了） |
 | 异常 | 归一为可读错误字符串，不抛栈 | **照记 1 次** |
 | `deny` | 直接返回可读理由，**不调用 fn** | 不记 |
-| `require_approval` | v1 返回“需人工审批…本次已拒绝”，**不调用 fn** | 不记 |
+| `require_approval`（HITL 关） | 返回“需人工审批…本次已拒绝”，**不调用 fn** | 不记 |
+| `require_approval`（HITL 开） | 签发 `ApprovalRequest` -> `interrupt()` 挂起；恢复后 approve 执行原工具 / reject 返回可读理由 | 仅 approve 执行后记 |
 
-`require_approval` 的打断（interrupt）与审批 UI 属 G7/T9-2，本卡只留这一个返回分支。
+`require_approval` 的挂起由 G7/T9-2 接入：`ENABLE_HITL=False` 时保持 G5 原行为（同一个
+拒绝字符串，零 IO）；`ENABLE_HITL=True` 且工具策略开启时，在工具函数内部调用
+`langgraph.types.interrupt(审批载荷)`。LangGraph 的 `ToolNode` 会重新抛出
+`GraphInterrupt`（见 `tool_node.py` 对 `GraphBubbleUp` 的特判），因此可以冒泡成中断。
+
+**结果码**：拒绝 / 审批两条路径都通过 `agent.observability.tool_outcome` 暴露本次调用的
+结果码（`approval_required` / `denied_timeout` / `denied_calls` / `denied_cost` /
+`rejected_by_user`），由 LangChain handler 在工具结束时读进 `span.attrs.error_kind`。
+executor 不直接调 tracer（分层：执行器只管执行，追踪是旁路）。
 
 超时收尾：`asyncio.wait_for` 内部会取消并 await 目标任务；这里额外
 `cancel()` + `gather(..., return_exceptions=True)` 一次，确保 Python 3.11 下
@@ -36,11 +45,20 @@ import contextvars
 import functools
 import inspect
 import logging
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
+
+from langgraph.types import interrupt
 
 from agent.domain.budget import BudgetLedger, call_cost
 from agent.domain.tool_policy import PolicyContext, decide
+from agent.observability.tool_outcome import (
+    clear_tool_outcome,
+    mark_outcome,
+    remember_outcome,
+    set_tool_outcome,
+)
 from config import settings
 from src.context_manager import estimate_tokens
 
@@ -48,17 +66,25 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from agent.domain.budget import BudgetSnapshot
+    from agent.domain.roles import ApprovalRequest
     from agent.domain.tool import ToolSpec
 
 logger = logging.getLogger(__name__)
 
 _UNKNOWN_SCOPE = "unknown"
+_REJECTED_MESSAGE = "用户拒绝执行该工具，本次未调用。"
+_APPROVAL_UNAVAILABLE_MESSAGE = "审批服务不可用，已拒绝执行该工具（fail-closed）。"
 
 _scope_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("tool_scope", default=None)
+#: 本次图推进是否是 `Command(resume=...)` 触发的恢复（由 resume 路由设置）
+_resume_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "tool_approval_resume", default=False
+)
 _scope_warned = False
 _default_ledger: BudgetLedger | None = None
 
 __all__ = [
+    "approval_resume_scope",
     "current_scope",
     "get_default_ledger",
     "set_default_ledger",
@@ -103,6 +129,55 @@ def tool_scope(scope: str) -> Iterator[None]:
         yield
     finally:
         _scope_var.reset(token)
+
+
+@contextmanager
+def approval_resume_scope() -> Iterator[None]:
+    """在 `with` 块内标记“本次推进是 resume”。
+
+    恢复时 LangGraph 会**从头重跑**被中断的工具函数；执行器据此跳过“再次签发凭据”，
+    只调用 `interrupt()` 取回 resume 值（否则每恢复一次就多签一张没人用的凭据）。
+    contextvar 由 resume 路由在驱动 `astream(Command(resume=...))` 前设置。
+    """
+    token = _resume_var.set(True)
+    try:
+        yield
+    finally:
+        _resume_var.reset(token)
+
+
+def _args_digest(kwargs: dict[str, Any]) -> str:
+    """参数摘要：`query=…&max=5` 形态，供人工核对“批的是什么”。
+
+    只做稳定序列化，不解析参数语义；超长截断，避免把大对象塞进审批卡片。
+    """
+    parts = [f"{key}={kwargs[key]}" for key in sorted(kwargs)]
+    digest = "&".join(parts)
+    return digest[:300]
+
+
+def _current_tool_call_id(tool_name: str, kwargs: dict[str, Any]) -> str:
+    """尽力取当前 tool_call 的 id；取不到返回空串（字段仍存在，不影响续跑）。
+
+    LangGraph 不通过工具参数暴露 tool_call_id，但当前 task 的 config 里有
+    `__pregel_read`（读本 superstep 的通道值）。读最新一条 AIMessage 的 tool_calls，
+    按“工具名 + 参数”匹配；这是内部接口，任何异常都静默兜底（id 只用于审计）。
+    """
+    try:
+        from langgraph.config import get_config
+
+        configurable = (get_config() or {}).get("configurable") or {}
+        read = configurable.get("__pregel_read")
+        if not callable(read):
+            return ""
+        messages = read("messages") or []
+        for message in reversed(messages):
+            for call in reversed(getattr(message, "tool_calls", None) or []):
+                if call.get("name") == tool_name and dict(call.get("args") or {}) == dict(kwargs):
+                    return str(call.get("id") or "")
+    except Exception:  # noqa: BLE001 - 审批 id 只用于审计，取不到不能影响执行
+        return ""
+    return ""
 
 
 # ── 账本（默认实现惰性创建，避免默认关闭时也去碰 Redis） ─────────────
@@ -161,31 +236,135 @@ def wrap_tool(
         )
 
         decision = decide(spec, ctx, used)
+        if decision.kind == "require_approval":
+            if not settings.ENABLE_HITL:
+                # G5 原行为：返回可读拒绝理由，不调用 fn、不记账；只补结果码给追踪
+                logger.info(
+                    "工具调用被策略拦截：%s -> %s（%s）",
+                    spec.name,
+                    decision.kind,
+                    decision.code,
+                )
+                return _mark_outcome(decision.reason, "approval_required", spec.name, kwargs)
+            return await _run_with_approval(
+                fn, spec, args, kwargs, active=active, scope=scope, used=used
+            )
+
         if decision.kind != "allow":
-            # deny / require_approval：不调用 fn，也不记账
+            # deny：不调用 fn，也不记账
             logger.info(
                 "工具调用被策略拦截：%s -> %s（%s）", spec.name, decision.kind, decision.code
             )
-            return decision.reason
+            return _mark_outcome(decision.reason, decision.code, spec.name, kwargs)
 
-        try:
-            result = await _run_with_timeout(fn, spec.timeout_seconds, args, kwargs)
-        except TimeoutError:
-            await _record(active, scope, spec)
-            logger.warning("工具 %s 执行超时（>%ss）", spec.name, f"{spec.timeout_seconds:g}")
-            return f"工具执行超时（>{spec.timeout_seconds:g}s），已终止"
-        except Exception as exc:  # noqa: BLE001 - 工具异常归一为可读文本，不打断 Agent 循环
-            await _record(active, scope, spec)
-            logger.warning("工具 %s 执行失败：%s: %s", spec.name, type(exc).__name__, exc)
-            return f"工具 {spec.name} 执行出错：{type(exc).__name__}: {exc}"
-
-        await _record(active, scope, spec, result)
-        return result
+        return await _execute_and_record(fn, spec, args, kwargs, active=active, scope=scope)
 
     # 包装不能改变 schema：签名必须仍然跟随 `__wrapped__`
     if inspect.signature(wrapped) != original_signature:
         raise RuntimeError(f"工具包装后签名不一致：{spec.name}")
     return wrapped
+
+
+def _mark_outcome(value: Any, code: str, tool_name: str, kwargs: dict[str, Any]) -> Any:
+    """把结果码挂到返回值 + tool_call_id 索引上（回调两条路都能读到）。"""
+    remember_outcome(_current_tool_call_id(tool_name, kwargs), code)
+    return mark_outcome(value, code)
+
+
+def _interrupt_with_outcome(payload: dict[str, Any]) -> Any:
+    """调用 `interrupt()`；挂起时把 `approval_required` 挂到异常对象上。
+
+    LangGraph 用 `GraphInterrupt` 冒泡，ToolNode 会重新抛出；LangChain 的 `on_tool_error`
+    在回调线程里执行（contextvar 过不去），异常对象是同一个引用，所以把结果码挂在
+    `exc.error_kind` 上，handler 能稳定读到（见 `tool_outcome.ToolOutcome` 的说明）。
+    """
+    set_tool_outcome("approval_required")
+    try:
+        return interrupt(payload)
+    except BaseException as exc:
+        # 挂不上也不能改变异常本身
+        with suppress(Exception):
+            exc.error_kind = "approval_required"  # type: ignore[attr-defined]
+        raise
+
+
+async def _run_with_approval(
+    fn: Callable[..., Any],
+    spec: ToolSpec,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    active: BudgetLedger,
+    scope: str,
+    used: BudgetSnapshot,
+) -> Any:
+    """HITL：签发凭据 -> `interrupt()` 挂起 -> 恢复后按决定执行或拒绝。
+
+    - `approve`：继续执行原工具（走与 allow 相同的超时 / 记账路径）；
+    - `reject`：返回可读理由字符串，**不抛异常**、不执行、不记账；
+    - 凭据签发失败（Redis 不可用）：fail-closed，返回可读理由并拒绝执行。
+    """
+    if not _resume_var.get():
+        from agent.adapters.stores import approval_store
+
+        request: ApprovalRequest | None = await approval_store.create(
+            thread_id=scope,
+            tool=spec.name,
+            args_digest=_args_digest(kwargs),
+            cost_estimate=call_cost(spec),
+            budget_remaining=max(0.0, settings.TOOL_SESSION_COST_LIMIT - used.cost),
+            permission=spec.permission,
+            tool_call_id=_current_tool_call_id(spec.name, kwargs),
+        )
+        if request is None:
+            logger.warning("审批凭据签发失败，拒绝执行工具 %s（fail-closed）", spec.name)
+            return _mark_outcome(
+                _APPROVAL_UNAVAILABLE_MESSAGE, "approval_required", spec.name, kwargs
+            )
+        # 挂起期间先打标：恢复后若用户拒绝会改写为 rejected_by_user
+        decision = _interrupt_with_outcome(asdict(request))
+    else:
+        # 恢复执行：凭据已在 resume 路由里原子消费，这里只取回 resume 值
+        decision = _interrupt_with_outcome({"_resume": True})
+
+    if decision != "approve":
+        # 未知值一律按拒绝处理（契约：不得把未知 decision 当 approve）
+        logger.info("用户拒绝执行工具 %s（decision=%r）", spec.name, decision)
+        return _mark_outcome(_REJECTED_MESSAGE, "rejected_by_user", spec.name, kwargs)
+
+    clear_tool_outcome()
+    return await _execute_and_record(fn, spec, args, kwargs, active=active, scope=scope)
+
+
+async def _execute_and_record(
+    fn: Callable[..., Any],
+    spec: ToolSpec,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    active: BudgetLedger,
+    scope: str,
+) -> Any:
+    """执行原工具：超时 / 异常归一 + 记账；超时补 `denied_timeout` 结果码。"""
+    try:
+        result = await _run_with_timeout(fn, spec.timeout_seconds, args, kwargs)
+    except TimeoutError:
+        await _record(active, scope, spec)
+        logger.warning("工具 %s 执行超时（>%ss）", spec.name, f"{spec.timeout_seconds:g}")
+        return _mark_outcome(
+            f"工具执行超时（>{spec.timeout_seconds:g}s），已终止",
+            "denied_timeout",
+            spec.name,
+            kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001 - 工具异常归一为可读文本，不打断 Agent 循环
+        await _record(active, scope, spec)
+        logger.warning("工具 %s 执行失败：%s: %s", spec.name, type(exc).__name__, exc)
+        return f"工具 {spec.name} 执行出错：{type(exc).__name__}: {exc}"
+
+    clear_tool_outcome()
+    await _record(active, scope, spec, result)
+    return result
 
 
 async def _run_with_timeout(

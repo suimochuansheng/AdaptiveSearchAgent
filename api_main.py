@@ -45,6 +45,7 @@ from langgraph.types import Command
 from pydantic import BaseModel
 from redis import asyncio as aioredis
 
+from agent.adapters.api.hitl import router as hitl_router
 from agent.observability.langchain_handler import build_callbacks
 from agent.observability.tracer import get_tracer
 from agent.observability.turn import next_turn_index, turn_span
@@ -280,6 +281,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+# G7/T9-2：外层 HITL resume 路由（ENABLE_HITL 关闭时 handler 直接 404）
+app.include_router(hitl_router)
 
 # ---------- CORS 中间件（允许前端 file:// 或 localhost 跨域访问）----------
 app.add_middleware(

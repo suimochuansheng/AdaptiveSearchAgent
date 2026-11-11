@@ -156,6 +156,13 @@ class Settings(BaseSettings):
     ENABLE_TOOL_POLICY: bool = False
     # 链路追踪（T7-0）：默认关闭；关时零文件 IO、零 callbacks，SSE 帧逐帧一致
     ENABLE_TRACE: bool = False
+    # 工具级人工审批（G7/T9-2）：默认关闭；关时执行器仍走 G5 的“需审批但未启用”拒绝分支，
+    # 审批路由即使被调用也返回 404。开启后危险工具在工具函数内 interrupt() 挂起。
+    ENABLE_HITL: bool = False
+    # 审批凭据有效期（秒）：契约冻结 10 分钟；验收时临时调 1 秒验证 410
+    APPROVAL_TTL_SECONDS: int = 600
+    # 审批墓碑保留时长（秒）：28 小时内区分“已消费（409）/ 已过期（410）/ 从未存在（404）”
+    APPROVAL_TOMBSTONE_TTL_SECONDS: int = 86400
     # span 落盘目录（每 span 一行 JSON：<TRACE_DIR>/<YYYY-MM-DD>.jsonl）；logs/ 已被 gitignore
     TRACE_DIR: str = "logs/trace"
     # 单轮工具调用上限（达到后本轮后续调用直接拒绝）

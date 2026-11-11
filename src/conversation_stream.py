@@ -8,7 +8,10 @@
 - `tool_call`：模型决定调工具时立即通知，客户端可显示"正在调研…"；
 - `ping`：`heartbeat_seconds` 秒内没有事件时发心跳，长工具调用期间保持连接活性；
 - `final`：完整回答（兼容只读 final 的客户端与 curl 脚本）；
-- `error`：执行异常（与旧端点同款结构）。
+- `error`：执行异常（与旧端点同款结构）；
+- `interrupt`：外层 HITL 审批挂起（T9-2，仅 `ENABLE_HITL` 开启且命中审批规则时出现；
+  载荷与判定见 `agent/adapters/api/hitl.py`）。出现该帧后本轮不发 `final`，等 `/resume`
+  续跑；开关关闭 / 无中断时帧序列与改造前逐帧一致。
 
 只转发 `langgraph_node == "agent"` 的 chunk，因此 `deep_research` 内部那张 workflow
 子图（planner/writer 等节点）的模型输出不会污染外层会话的 token 流。
@@ -166,7 +169,7 @@ async def _stop_producer(producer: asyncio.Task[None]) -> None:
         await producer
 
 
-async def stream_conversation(
+async def stream_conversation(  # noqa: C901 - 帧循环本身是状态机，拆开反而难读
     graph: Any,
     inputs: dict[str, Any],
     config: dict[str, Any],
@@ -213,6 +216,7 @@ async def stream_conversation(
     # deep_research 子图的 token 会源源不断进队列，但被节点过滤掉、不产生帧，
     # 只按队列判空会导致子图连续出字时客户端全程无声（实测 272s 无 ping）。
     last_emit = clock()
+    interrupted = False
     try:
         while True:
             item = await _wait_for_event(
@@ -236,12 +240,30 @@ async def stream_conversation(
             if is_disconnected is not None and await is_disconnected():
                 return
 
+            # 外层 HITL：LangGraph 的中断出现在 values chunk 的 `__interrupt__` 键里
+            # （不是独立的 stream mode）。只有带 approval_id 的外层审批才编码成
+            # interrupt 帧；子图成本确认等非外层中断跳过，不改变原有帧语义。
+            if kind == "values" and isinstance(payload, dict) and payload.get("__interrupt__"):
+                from agent.adapters.api.hitl import build_interrupt_frame
+
+                interrupt_frame = build_interrupt_frame(payload)
+                if interrupt_frame:
+                    yield interrupt_frame
+                    last_emit = clock()
+                    interrupted = True
+                    break
+                continue
+
             frame = _consume(kind, payload, snapshot, answer_parts)
             if frame:
                 yield frame
                 last_emit = clock()
     finally:
         await _stop_producer(producer)
+
+    if interrupted:
+        # 本轮已挂起等人工审批：不发 final（恢复后由 /resume 继续吐后续帧）
+        return
 
     final_state = snapshot["final"] or {}
     messages = final_state.get("messages") or []

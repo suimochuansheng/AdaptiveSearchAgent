@@ -22,6 +22,11 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 
+from agent.observability.tool_outcome import (
+    clear_tool_outcome,
+    take_outcome_for,
+    take_tool_outcome,
+)
 from agent.observability.tracer import SPAN_ATTRS, SpanHandle, Tracer, current_turn
 from config import settings
 
@@ -171,10 +176,21 @@ class SpanCollectorHandler(BaseCallbackHandler):
         inputs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        # 清空上一轮结果码，避免串到本次工具 span
+        clear_tool_outcome()
         self._start_tool(run_id, serialized, metadata)
 
     def on_tool_end(self, output: Any, *, run_id: Any, **kwargs: Any) -> None:
-        self._end(run_id, "ok", {})
+        # 执行器通过 contextvar（同任务时）/ tool_call_id 索引 / 返回值属性暴露结果码，
+        # 这里依次读取并填进 error_kind；读完即清，避免串到下一次调用。
+        code = take_tool_outcome()
+        if not code:
+            code = take_outcome_for(str(getattr(output, "tool_call_id", "") or ""))
+        if not code:
+            code = getattr(output, "error_kind", None) or getattr(
+                getattr(output, "content", None), "error_kind", None
+            )
+        self._end(run_id, "ok", {"error_kind": code} if code else {})
 
     def on_tool_error(
         self,
@@ -185,7 +201,7 @@ class SpanCollectorHandler(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        self._fail(run_id, error)
+        self._fail(run_id, error, tool=True)
 
     # ── chain：只透传，不产 span ──────────────────────────────────
 
@@ -248,7 +264,14 @@ class SpanCollectorHandler(BaseCallbackHandler):
         except Exception as exc:  # noqa: BLE001
             self._warn_once(f"span 结束失败：{exc}")
 
-    def _fail(self, run_id: Any, error: BaseException) -> None:
+    def _fail(self, run_id: Any, error: BaseException, *, tool: bool = False) -> None:
+        if tool:
+            # 审批挂起（GraphInterrupt）不是工具失败：执行器已把结果码写成
+            # approval_required，span 用 ok + error_kind 表达“被拦住”，不标 error
+            code = take_tool_outcome() or getattr(error, "error_kind", None)
+            if code:
+                self._end(run_id, "ok", {"error_kind": code})
+                return
         self._end(run_id, "error", {"error_kind": _error_kind(error)})
 
     def _warn_once(self, message: str) -> None:
