@@ -30,7 +30,7 @@ from src.utils.logger import get_logger
 # 用项目统一的 JSON logger（adaptive_agent，INFO 级、带 handler）；
 # 用 logging.getLogger(__name__) 会冒泡到 root 的 WARNING 默认级别，INFO 会静默丢失
 logger = get_logger()
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC
 from typing import TYPE_CHECKING, Any, cast
 
@@ -45,6 +45,9 @@ from langgraph.types import Command
 from pydantic import BaseModel
 from redis import asyncio as aioredis
 
+from agent.observability.langchain_handler import build_callbacks
+from agent.observability.tracer import get_tracer
+from agent.observability.turn import next_turn_index, turn_span
 from config import settings
 from src.checkpointer import get_business_pool
 
@@ -719,18 +722,25 @@ async def chat_conversation(request: Request, body: ConversationRequest):
             graph = await get_conversation_graph()
             config = {"configurable": {"thread_id": thread_id}}
 
+            # 链路追踪（T7-0）：开关关闭时 trace 是空上下文，不碰 config、不建 span
+            trace: Any = nullcontext()
+            if settings.ENABLE_TRACE:
+                config["callbacks"] = build_callbacks(get_tracer(), langfuse_handler)
+                trace = turn_span(get_tracer(), thread_id, await next_turn_index(graph, config))
+
             # 五类事件：token（增量文本）/ tool_call / ping（心跳）/ final / error
-            async for frame in stream_conversation(
-                graph,
-                {
-                    "messages": [HumanMessage(content=body.message)],
-                    "user_id": body.user_id or thread_id,
-                },
-                config,
-                is_disconnected=request.is_disconnected,
-            ):
-                yield frame
-            await set_task_state(thread_id, "completed")
+            async with trace:
+                async for frame in stream_conversation(
+                    graph,
+                    {
+                        "messages": [HumanMessage(content=body.message)],
+                        "user_id": body.user_id or thread_id,
+                    },
+                    config,
+                    is_disconnected=request.is_disconnected,
+                ):
+                    yield frame
+                await set_task_state(thread_id, "completed")
 
         except ConversationStreamError:
             # error 事件已由 stream_conversation 推送，这里只收尾状态机

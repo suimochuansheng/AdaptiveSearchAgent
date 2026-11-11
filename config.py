@@ -154,6 +154,10 @@ class Settings(BaseSettings):
 
     # 工具级权限与预算（T6-3）：默认关闭；关时执行器零包装，代码路径与改造前一致
     ENABLE_TOOL_POLICY: bool = False
+    # 链路追踪（T7-0）：默认关闭；关时零文件 IO、零 callbacks，SSE 帧逐帧一致
+    ENABLE_TRACE: bool = False
+    # span 落盘目录（每 span 一行 JSON：<TRACE_DIR>/<YYYY-MM-DD>.jsonl）；logs/ 已被 gitignore
+    TRACE_DIR: str = "logs/trace"
     # 单轮工具调用上限（达到后本轮后续调用直接拒绝）
     TOOL_MAX_CALLS_PER_TURN: int = 8
     # 会话累计工具费用上限（元）；v1 计价 = 每次调用 1 个 unit
