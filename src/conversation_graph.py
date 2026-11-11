@@ -29,12 +29,13 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from agent.adapters.tools import registry
 from config import settings
 from src.context_manager import build_context
 from src.tools.calculator import calculate_math
-from src.tools.offload import read_offload, shrink_tool_message
-from src.tools.rag import search_knowledge
-from src.tools.search import search_tavily
+from src.tools.offload import read_offload, shrink_tool_message  # noqa: F401 - 保持既有导出
+from src.tools.rag import search_knowledge  # noqa: F401 - 保持既有导出
+from src.tools.search import search_tavily  # noqa: F401 - 保持既有导出
 from src.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -137,14 +138,8 @@ async def _run_deep_research(query: str) -> str:
     return report
 
 
-# ── 工具列表：模型每轮只能从这 4 个工具里选 ──────────────────────────────
-TOOLS: list[Callable[..., Any]] = [
-    search_knowledge,
-    search_tavily,
-    calculator,
-    deep_research,
-    read_offload,
-]
+# ── 工具列表：模型每轮只能从这 5 个工具里选（单一事实源：tools/registry.py）──
+TOOLS: list[Callable[..., Any]] = registry.to_lc_tools()
 
 # ── System Prompt（稳定区：角色 + 工具索引 + 判断规则，阶段 B 会做预算管理）──
 SYSTEM_PROMPT = """你是内部知识助手，可以自主选择工具完成任务：

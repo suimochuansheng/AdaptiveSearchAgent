@@ -85,3 +85,4 @@ docs/test_reports/
 
 # 流程梳理文档（一次性分析文档，不入库）
 core_execution_flow_IR.md
+.pre-commit-cache/
