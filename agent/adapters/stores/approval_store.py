@@ -260,15 +260,13 @@ class ApprovalStore:
     async def remember_request(self, request_id: str, thread_id: str | None = None) -> bool:
         """`SET NX approval_req:<id>` TTL 24h；返回是否首次。
 
-        Redis 不可用时返回 **False**（按重复处理 -> 409），这是 fail-closed：
-        宁可让用户重开一轮，也不重复驱动同一会话。
+        Redis 不可用时**抛 `ApprovalStoreUnavailable`**（fail-closed），而不是伪装成
+        "重复请求"：调用方（resume 路由）据此返回 409 并给出真实原因
+        "审批凭据存储暂不可用，本次未执行，请稍后重试"（OI-T92-001）。
         """
         key = REQUEST_KEY.format(key=f"{thread_id}:{request_id}" if thread_id else request_id)
-        try:
-            client = await self._redis()
-            created = await self._run(client.set(key, "1", nx=True, ex=24 * 60 * 60))
-        except ApprovalStoreUnavailable:
-            return False
+        client = await self._redis()
+        created = await self._run(client.set(key, "1", nx=True, ex=24 * 60 * 60))
         return bool(created)
 
 

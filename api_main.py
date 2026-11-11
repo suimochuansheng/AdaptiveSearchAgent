@@ -165,6 +165,28 @@ async def set_task_state(thread_id: str, state: str, interrupt_time=None):
         )
 
 
+async def release_session_lock(thread_id: str, client: Any | None = None) -> bool:
+    """删除会话锁并确认键真的消失（OI-T92-002）。
+
+    残留锁可能由**别的进程**持有，本进程没有 token；`Lock.release()` 会抛
+    `LockError` 且锁原地不动。清理任务只需要让下一次请求能进来，所以直接
+    `DEL agent_lock:<thread_id>`，删完再用 `EXISTS` 确认（不把异常吞掉了事）。
+
+    Args:
+        thread_id: 会话 id。
+        client: 可注入的 Redis 客户端（测试用）；默认用模块级 `redis_client`。
+
+    Returns:
+        True 表示键最终不存在；False 表示删除后仍存在（需要人工排查）。
+    """
+    redis = client or redis_client
+    key = f"agent_lock:{thread_id}"
+    if not await redis.exists(key):
+        return True
+    await redis.delete(key)
+    return not await redis.exists(key)
+
+
 # ---------- 后台维护：异步任务僵尸回收与清理（阶段 C2）----------
 async def maintain_async_tasks_once(
     *,
@@ -245,11 +267,11 @@ async def lifespan(app: FastAPI):
             for row in rows:
                 thread_id = row["thread_id"]
                 await set_task_state(thread_id, "failed")
-                # 释放可能残留的 Redis 锁
-                lock = redis_client.lock(f"agent_lock:{thread_id}")
-                if await lock.locked():
-                    await lock.release()
-                logger.info(f"清理超时中断会话: {thread_id}")
+                # 直接删键并确认：锁可能由别的进程持有，本进程 release() 必抛 LockError
+                if await release_session_lock(thread_id):
+                    logger.info("清理超时中断会话并确认会话锁已释放: %s", thread_id)
+                else:
+                    logger.warning("清理超时中断会话，但会话锁删除后仍存在: %s", thread_id)
 
     global cleanup_task, async_maintenance_task
     cleanup_task = asyncio.create_task(clean_interrupted_tasks())

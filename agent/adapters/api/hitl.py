@@ -205,10 +205,12 @@ async def resume_conversation(  # noqa: C901 - 状态码矩阵按契约逐条展
     except HTTPException:
         raise
     except store.ApprovalStoreUnavailable as exc:
-        # Redis 不可用：fail-closed，不执行；契约没有 503，沿用 404 的“未启用”语义
-        logger.warning("审批存储不可用，resume 失败（fail-closed）：%s", exc)
+        # 凭据存储不可用：fail-closed，不执行；返回 409（原本留给"重复/冲突"，
+        # 但契约补充说明允许用它表达"存储不可用、可重试"），正文必须说明真实原因。
+        logger.warning("审批凭据存储不可用，resume 未执行（fail-closed）：%s", exc)
         raise HTTPException(
-            status_code=404, detail="审批服务不可用，已拒绝（fail-closed）"
+            status_code=409,
+            detail="审批凭据存储暂不可用，本次未执行，请稍后重试",
         ) from exc
     except Exception as exc:  # noqa: BLE001 - 读状态 / 读凭据失败一律不执行
         logger.exception("resume 前置校验失败（fail-closed）")
@@ -233,9 +235,10 @@ async def resume_conversation(  # noqa: C901 - 状态码矩阵按契约逐条展
         raise
     except store.ApprovalStoreUnavailable as exc:
         await lock.release()
-        logger.warning("审批凭据消费失败（fail-closed）：%s", exc)
+        logger.warning("审批凭据存储不可用，凭据未消费（fail-closed）：%s", exc)
         raise HTTPException(
-            status_code=404, detail="审批服务不可用，已拒绝（fail-closed）"
+            status_code=409,
+            detail="审批凭据存储暂不可用，本次未执行，请稍后重试",
         ) from exc
 
     # 6) 200 + SSE：用 Command(resume=decision) 续跑同一 thread_id

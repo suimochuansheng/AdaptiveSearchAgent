@@ -1141,10 +1141,11 @@ async def c2_redis_unavailable(h: Harness) -> None:
         COUNTERS.danger == 0
         and "interrupt" not in types
         and "审批服务不可用" in final.get("content", "")
-        and resp.status_code in (404, 409)
+        and resp.status_code == 409
+        and "审批凭据存储暂不可用" in resp.text
         and not any(e.get("type") == "error" for e in events)
     )
-    deviation = "" if resp.status_code == 404 else "；偏离交接单（那里写 404）"
+    deviation = "" if resp.status_code == 409 else "；偏离契约补行（存储不可用应为 409）"
     c_check(
         "C2 Redis 不可用：审批一律拒绝（fail-closed）且会话不崩",
         ok,
@@ -1202,28 +1203,26 @@ async def c3_concurrent_resume(h: Harness) -> None:
 
 async def c4_cleanup_task(h: Harness) -> None:
     """清理任务：调度器无法隔离验证；但可确定性地验证"残留锁释放"这一步。"""
+    import api_main
+
     source = (REPO_ROOT / "api_main.py").read_text(encoding="utf-8")
     predicate = "INTERVAL '10 minutes'" in source and "state = 'interrupted'" in source
-    key = f"agent_lock:c4-{uuid.uuid4().hex[:10]}"
+    thread = f"c4-{uuid.uuid4().hex[:10]}"
+    key = f"agent_lock:{thread}"
     owner = h.redis.lock(key, timeout=30)
     await owner.acquire(blocking=False)
-    other = h.redis.lock(key, timeout=30)
-    locked = await other.locked()
-    raised = ""
-    try:
-        await other.release()
-    except Exception as exc:  # noqa: BLE001
-        raised = type(exc).__name__
+    locked = await h.redis.exists(key) == 1
+    # 修复后的清理路径：DEL 键 + EXISTS 确认，不调用 Lock.release()（无 token 会抛 LockError）
+    released = await api_main.release_session_lock(thread, client=h.redis)
     still_there = await h.redis.exists(key)
-    await owner.release()
+    if still_there:
+        await owner.release()
     await h.redis.delete(key)
-    lock_released = not still_there
     c_check(
-        "C4 清理任务：状态转 failed 可成立，但残留锁释放失败（open_issue）",
-        predicate and locked and lock_released,
-        f"sql_predicate={predicate}, locked={locked}, release_raises={raised!r}, "
-        f"lock_exists_after={still_there}；共享 8200 实例实测 state->failed、锁未释放；"
-        "调度器固定 sleep 60s 且内联在 lifespan，未做隔离复跑",
+        "C4 清理任务：残留锁用 DEL 直接释放并确认键消失（OI-T92-002）",
+        predicate and locked and released and not still_there,
+        f"sql_predicate={predicate}, locked={locked}, helper_released={released}, "
+        f"lock_exists_after={still_there}",
     )
 
 
