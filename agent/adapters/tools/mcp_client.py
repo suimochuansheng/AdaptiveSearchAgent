@@ -162,13 +162,7 @@ async def load_mcp_tools(
 
     tools: list[tuple[ToolSpec, Callable[..., Any]]] = []
     for tool in listed.tools:
-        spec = _build_spec(tool, timeout, max_output_tokens)
-        tools.append(
-            (
-                spec,
-                _build_callable(tool.name, tool.description or "", tool.inputSchema or {}, timeout),
-            )
-        )
+        tools.append(_build_tool(tool, timeout, max_output_tokens))
 
     logger.info(
         "MCP 工具加载完成",
@@ -253,12 +247,75 @@ async def _close_opened(opened: list[Any], *, quiet: bool = False) -> None:
                 logger.warning("关闭 MCP 会话组件时出错（已忽略）：%s", exc)
 
 
-def _build_spec(tool: Any, timeout: float, max_output_tokens: int) -> ToolSpec:
-    """把 MCP 的 tool 描述转成本仓库的 `ToolSpec`。"""
+def _build_tool(
+    tool: Any,
+    timeout: float,
+    max_output_tokens: int,
+) -> tuple[ToolSpec, Callable[..., Any]]:
+    """构造一个 MCP 工具的 `(ToolSpec, 可调用体)`，两者从同一份远端描述派生。
+
+    先建可调用体、再由它反查 `ToolSpec` 的原因见 `_build_spec` 的 docstring：
+    模型看到的是可调用体转换后的 schema，spec 必须存**同一份**，否则就出现
+    OI-T93-004 的漂移（spec 存原始 inputSchema、模型看到另一套）。
+    """
+    name = str(tool.name)
+    description = tool.description or ""
+    input_schema = dict(tool.inputSchema or {})
+    callable_ = _build_callable(name, description, input_schema, timeout)
+    spec = _build_spec(tool, timeout, max_output_tokens, callable_=callable_)
+    return spec, callable_
+
+
+def _build_spec(
+    tool: Any,
+    timeout: float,
+    max_output_tokens: int,
+    *,
+    callable_: Callable[..., Any] | None = None,
+) -> ToolSpec:
+    """把 MCP 的 tool 描述转成本仓库的 `ToolSpec`（OI-T93-004）。
+
+    口径：**`ToolSpec` 存"模型真正看到的那一份"**。MCP 的 `description` /
+    `inputSchema` 是原料，`_build_callable` 把它们还原成签名后，LangChain 的
+    `convert_to_openai_tool` 会再生成一份 visible schema（去掉 `title`、把 docstring
+    的 Args 变成属性 description、description 只留摘要）。如果 spec 另存原始
+    inputSchema，两边就会漂移——模型按 A 选参数、注册表按 B 校验。
+
+    因此这里直接用 `convert_to_openai_tool(callable_)` 的结果填 spec，并立即做一次
+    **反向自检**：visible schema 必须覆盖远端 inputSchema 的每一个约束（参数名 /
+    类型 / 必填 / enum / 嵌套），description 必须是远端 description 的摘要；
+    覆盖不了就 `ValueError`（fail-fast，不静默丢参数）。
+
+    Args:
+        tool: MCP SDK 的 tool 对象（需有 `name` / `description` / `inputSchema`）。
+        timeout: 透传到 `ToolSpec.timeout_seconds`。
+        max_output_tokens: 透传到 `ToolSpec.max_output_tokens`。
+        callable_: 已用同一份远端描述建好的可调用体；不传则现场构建（兼容旧调用）。
+
+    Raises:
+        ValueError: visible schema / description 与远端描述不一致（参数丢失或描述被吞）。
+    """
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    name = str(tool.name)
+    if callable_ is None:
+        callable_ = _build_callable(
+            name,
+            tool.description or "",
+            dict(tool.inputSchema or {}),
+            timeout,
+        )
+
+    visible = convert_to_openai_tool(callable_).get("function") or {}
+    visible_description = visible.get("description") or ""
+    visible_schema = visible.get("parameters") or {"type": "object", "properties": {}}
+
+    _assert_visible_matches_payload(name, tool, visible_description, visible_schema)
+
     return ToolSpec(
-        name=tool.name,
-        description=tool.description or f"MCP 工具 {tool.name}",
-        input_schema=dict(tool.inputSchema or {"type": "object", "properties": {}}),
+        name=name,
+        description=visible_description,
+        input_schema=visible_schema,
         permission="external",
         cost_model=CostModel(unit="call", unit_cost=0.0),
         timeout_seconds=timeout,
@@ -266,6 +323,126 @@ def _build_spec(tool: Any, timeout: float, max_output_tokens: int) -> ToolSpec:
         requires_approval=False,
         feature_flag="ENABLE_MCP",
     )
+
+
+#: visible schema 里由 LangChain/Pydantic 生成、不承载远端约束的展示字段。
+_VISIBLE_IGNORED_KEYS = frozenset({"title", "description", "$schema"})
+
+
+def _assert_visible_matches_payload(
+    name: str,
+    tool: Any,
+    visible_description: str,
+    visible_schema: dict[str, Any],
+) -> None:
+    """自检：模型可见的 spec 必须仍是远端 MCP 描述的无损投影（OI-T93-004）。
+
+    Args:
+        name: 工具名（报错用）。
+        tool: MCP SDK 的 tool 对象。
+        visible_description: `convert_to_openai_tool` 给出的 description。
+        visible_schema: `convert_to_openai_tool` 给出的 parameters。
+
+    Raises:
+        ValueError: description 不是远端描述的摘要，或 parameters 丢了远端约束。
+    """
+    raw_description = tool.description or ""
+    raw_schema = dict(tool.inputSchema or {})
+
+    raw_flat = " ".join(raw_description.split())
+    visible_flat = " ".join(str(visible_description).split())
+    # description：visible 是 LangChain 解析 docstring 后的"摘要"（Args/Returns 会进
+    # 属性 description），所以要求它是远端全文的前缀；一边有一边空也算漂移。
+    if bool(raw_flat) != bool(visible_flat) or (
+        visible_flat and not raw_flat.startswith(visible_flat)
+    ):
+        raise ValueError(
+            f"MCP 工具 {name} 的 description 漂移："
+            f"visible={visible_flat[:80]!r}… 不是远端 description 的摘要"
+        )
+
+    problems = _schema_drift(raw_schema, visible_schema)
+    if problems:
+        raise ValueError(
+            f"MCP 工具 {name} 的 inputSchema 漂移（模型可见 schema 丢了远端约束）："
+            + "；".join(problems)
+        )
+
+
+def _schema_drift(raw: Any, visible: Any, path: str = "parameters") -> list[str]:
+    """逐项比对远端 schema 与 visible schema，返回差异列表（空 = 无损）。
+
+    只要求**远端有的约束，visible 必须也有**；visible 多出来的展示字段
+    （title / description / default 等）不算漂移。`required` 按集合比，顺序不敏感。
+    """
+    if not isinstance(raw, dict):
+        return [] if raw == visible else [f"{path}: {raw!r} != {visible!r}"]
+    if not isinstance(visible, dict):
+        return [f"{path}: 模型可见不是对象（{visible!r}）"]
+
+    problems = _properties_drift(raw, visible, path)
+    problems.extend(_required_drift(raw, visible, path))
+    problems.extend(_other_keys_drift(raw, visible, path))
+    return problems
+
+
+def _properties_drift(raw: dict[str, Any], visible: dict[str, Any], path: str) -> list[str]:
+    """比对 `properties`：参数名集合必须一致，每个子 schema 递归比对。"""
+    raw_props = raw.get("properties")
+    if not isinstance(raw_props, dict):
+        return []
+    visible_props = visible.get("properties")
+    if not isinstance(visible_props, dict):
+        return [f"{path}.properties: 模型可见缺少 properties"]
+
+    problems: list[str] = []
+    if set(raw_props) != set(visible_props):
+        problems.append(
+            f"{path}.properties 参数名不一致 "
+            f"raw={sorted(raw_props)} visible={sorted(visible_props)}"
+        )
+    for prop_name in sorted(set(raw_props) & set(visible_props)):
+        problems.extend(
+            _schema_drift(
+                raw_props[prop_name],
+                visible_props[prop_name],
+                f"{path}.properties.{prop_name}",
+            )
+        )
+    return problems
+
+
+def _required_drift(raw: dict[str, Any], visible: dict[str, Any], path: str) -> list[str]:
+    """比对 `required`（按集合，顺序不敏感）。"""
+    if "required" not in raw:
+        return []
+    raw_required = sorted(str(item) for item in (raw.get("required") or []))
+    visible_required = sorted(str(item) for item in (visible.get("required") or []))
+    if raw_required == visible_required:
+        return []
+    return [f"{path}.required 不一致 raw={raw_required} visible={visible_required}"]
+
+
+def _other_keys_drift(raw: dict[str, Any], visible: dict[str, Any], path: str) -> list[str]:
+    """比对 `properties` / `required` 之外的键（type / enum / items / anyOf …）。"""
+    problems: list[str] = []
+    for key, value in raw.items():
+        if key in {"properties", "required"} or key in _VISIBLE_IGNORED_KEYS:
+            continue
+        visible_value = visible.get(key)
+        if isinstance(value, dict):
+            problems.extend(_schema_drift(value, visible_value, f"{path}.{key}"))
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            if not isinstance(visible_value, list) or len(visible_value) != len(value):
+                problems.append(f"{path}.{key}: 列表形状不一致")
+                continue
+            for index, (raw_item, visible_item) in enumerate(
+                zip(value, visible_value, strict=True)
+            ):
+                problems.extend(_schema_drift(raw_item, visible_item, f"{path}.{key}[{index}]"))
+        elif visible_value != value:
+            problems.append(f"{path}.{key} 不一致 raw={value!r} visible={visible_value!r}")
+    return problems
 
 
 def _build_callable(

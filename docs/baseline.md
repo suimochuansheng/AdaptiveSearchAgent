@@ -11,6 +11,8 @@
 > - 2026-11-10（T0-2）：裁判名收敛到 `EVAL_JUDGE_MODEL`（默认取 `ALIYUN_QWEN_MODEL_NAME`），
 >   脚本启动即打印并写入报告；并发固定 `workers=2`、空检索自动重试 1 次；
 >   回归判据由 ±0.02 改为"**同口径跑 2 次取均值，两次均值差 ≤ 记录方差**"；新增 §7 Agent raw 基线。
+> - 2026-11-11（T-arch）：新增 1 份端口契约测试（2 例），pytest 通过数 223 -> 225，
+>   收集数 227 -> 229（总数 231 -> 233），nodeids 哈希同步更新；详见 §2 的说明。
 
 ---
 
@@ -36,15 +38,22 @@
 
 ## 2. 测试基线
 
+> **2026-11-11（T-arch）预期变化**：因新增 1 份端口契约测试
+> `tests/contracts/test_agent_runtime_contract.py`（N = **2** 例，参数化挂
+> `LangGraphRuntime` + `Fake`），收集数由 **227 变为 227+N = 229**（deselected 仍为 4，
+> 总数 231 -> 233），`pytest -q` 由 223 passed 变为 **225 passed**；nodeids 哈希随之
+> 更新。**这是有意的基线更新，不是回归**；除新增文件外没有改动任何既有用例。
+
 | 项 | 值 |
 |---|---|
-| `pytest -q` | **223 passed, 4 skipped, 4 deselected**（后端未启动时） |
-| `pytest --collect-only -q` | **227/231 collected（4 deselected）**，无 import 失败 |
-| 测试文件数 | 27 |
-| `.pytest_cache/v/cache/nodeids` | 228 行，sha256 `a57008dd1a22cb16ff5096dda448dcee641f266ce63786dc96eb7bfe25657334` |
+| `pytest -q` | **225 passed, 4 skipped, 4 deselected**（后端未启动时） |
+| `pytest --collect-only -q` | **229/233 collected（4 deselected）**，无 import 失败 |
+| 测试文件数 | 28 |
+| `.pytest_cache/v/cache/nodeids` | 230 行，sha256 `8c3cab4dcbda90dd1c90dafb9d0ad88d43af47723ab3a2dfa03fba2a26d4c8f3` |
 
 > 回归时先比"总数与 nodeids 哈希"：数量变化不一定是回归，但**nodeids 哈希变化必须能解释**。
 > 重新生成：`pytest --collect-only -q` 后取其 sha256。
+> 上一版（T-arch 前）：223 passed / 227/231 / 228 行 / `a57008dd1a22cb16ff5096dda448dcee641f266ce63786dc96eb7bfe25657334`。
 
 ## 3. 代码规模
 
