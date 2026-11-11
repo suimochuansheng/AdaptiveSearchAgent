@@ -151,6 +151,13 @@ class Settings(BaseSettings):
 
     # 异步任务：超时请求转为后台异步任务处理
     ENABLE_ASYNC_TASK: bool = False
+
+    # 工具级权限与预算（T6-3）：默认关闭；关时执行器零包装，代码路径与改造前一致
+    ENABLE_TOOL_POLICY: bool = False
+    # 单轮工具调用上限（达到后本轮后续调用直接拒绝）
+    TOOL_MAX_CALLS_PER_TURN: int = 8
+    # 会话累计工具费用上限（元）；v1 计价 = 每次调用 1 个 unit
+    TOOL_SESSION_COST_LIMIT: float = 2.0
     # 异步任务结果在 Redis 的存活时间（秒），默认 7 天
     ASYNC_TASK_RESULT_TTL: int = 604800
     # 异步任务僵尸判定：running 超过这么久没更新就认为 Worker 没了（秒）

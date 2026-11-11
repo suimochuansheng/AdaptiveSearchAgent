@@ -29,7 +29,7 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from agent.adapters.tools import registry
+from agent.adapters.tools import executor, registry
 from config import settings
 from src.context_manager import build_context
 from src.tools.calculator import calculate_math
@@ -254,8 +254,9 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     async def tools_node(state: ConversationState, config: RunnableConfig) -> dict:
         """执行工具，并把结果收口到 prompt 预算内（超预算压缩，超大落盘 + 指针）。"""
-        result = await tool_node.ainvoke(state)
         thread_id = str((config.get("configurable") or {}).get("thread_id", "default"))
+        with executor.tool_scope(thread_id):
+            result = await tool_node.ainvoke(state)
         return {
             "messages": [
                 shrink_tool_message(message, thread_id=thread_id) for message in result["messages"]

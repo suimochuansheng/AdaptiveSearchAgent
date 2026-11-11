@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING, Any
 
+from agent.adapters.tools.executor import wrap_tool
 from agent.domain.tool import CostModel, ToolSpec
 
 if TYPE_CHECKING:
@@ -146,9 +147,12 @@ def to_lc_tools() -> list[Callable[..., Any]]:
     """返回可直接交给 `bind_tools` / `ToolNode` 的工具列表。
 
     顺序 = `TOOL_SPECS` 的登记顺序；`register()` 追加的工具排在末尾。
-    返回的是工具原本的可调用体，不做包装，schema 与基线逐字节一致。
+
+    `ENABLE_TOOL_POLICY` 关闭时返回工具**原本的可调用体**（`is` 同一对象，
+    不包装、不 IO）；开启时交给 `executor.wrap_tool` 做策略 / 超时 / 记账包装，
+    签名与 schema 不变（schema 哈希仍是基线 `c48c9d48…`）。
     """
-    return [_resolve(name) for name in TOOL_SPECS]
+    return [wrap_tool(_resolve(name), TOOL_SPECS[name]) for name in TOOL_SPECS]
 
 
 def register(name: str, fn: Callable[..., Any], tool_spec: ToolSpec) -> None:
