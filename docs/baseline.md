@@ -139,8 +139,8 @@ top_k=3、workers=**2**、RAG 网关 **`http://localhost:8100`（ingest_dev 容�
 cd /home/ubhuazhu/dev_pros/AdaptiveSearchAgent
 eval $(poetry env activate)
 
-pytest -q                      # 期望 223 passed, 4 skipped, 4 deselected
-pytest --collect-only -q       # 期望 227/231 collected
+pytest -q                      # 期望 225 passed, 4 skipped, 4 deselected
+pytest --collect-only -q       # 期望 229/233 collected（4 deselected）
 
 # Ragas（约 11 分钟）
 # 前置：RAG 网关必须在跑，否则脚本直接失败（不再兜底）
@@ -185,6 +185,8 @@ cd /home/ubhuazhu/dev_pros/AdaptiveSearchAgent
 - 20 题均无 SSE `error` 事件（`errors` 为空）；
 - 报告：`文档/项目/AdaptiveSearchAgent/评测报告/agent_eval_baseline_raw_9bf183d_20261110-1403.json`。
 
+**结论**：raw 基线均分 **9.65**（20/20 有效，min/max 7/10），裁判 `qwen3.8-max-0902`、workers/并发 `--concurrency 1`；作为 §8 三组的对照下限（三组均不低于它）。
+
 **复跑命令**
 
 ```bash
@@ -212,6 +214,8 @@ poetry run python evals/agent_quality.py --label baseline_raw
 | A 全关（复现 raw） | **9.70** | 20/0 | 17/1/1/1/0 | 30.3s | 1.00 | 0 | `TOOL_POLICY=0 TRACE=0 HITL=0 MCP=0 EVAL_AUTO_APPROVE=0` |
 | B 治理开（审批/MCP 关） | **9.75** | 20/0 | 16/3/1/0/0 | 29.6s | 1.00 | 0 | `TOOL_POLICY=1 TRACE=1 HITL=0 MCP=0 EVAL_AUTO_APPROVE=0` |
 | C 治理+HITL（自动放行） | **9.85** | 20/0 | 18/1/1/0/0 | 29.7s | 1.00 | 0（20 题未触发；探针放行 1 次，不计入表） | `TOOL_POLICY=1 TRACE=1 HITL=1 MCP=0 EVAL_AUTO_APPROVE=1` |
+
+**结论**：A **9.70** / B **9.75** / C **9.85**，均不低于 raw **9.65**（裁判 `qwen3.8-max-0902`、workers/并发 `--concurrency 1`、同 20 题）——治理接入未降质。
 
 **与 §7（raw，9.65）的差异与结论**
 

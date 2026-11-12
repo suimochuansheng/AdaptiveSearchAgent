@@ -47,6 +47,13 @@ REPO = Path(__file__).resolve().parents[3]
 if str(REPO) not in sys.path:  # 让脚本在任意 cwd 下都能 import agent / src / config
     sys.path.insert(0, str(REPO))
 
+#: 卡级基线（pytest 通过数 / 收集数 / nodeids）唯一来源：`docs/baseline.md` §2。
+CASE_ROOT = REPO / "tests" / "test_agent_cases"
+if str(CASE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CASE_ROOT))
+
+import _baseline  # noqa: E402
+
 LEDGER = REPO / "tests" / "test_agent_cases" / "台账用例.csv"
 #: 交接单记录的开工基线（T7-0 之前）
 BASE_COMMIT = "355cabd"
@@ -54,9 +61,9 @@ BASE_COMMIT = "355cabd"
 FEATURE_COMMIT = "0d880d2"
 #: T7-0 契约 v2 追加提交（开发窗口）
 CONTRACT_COMMIT = "d20f463"
+#: 本卡验收提交（G6）：“零改动”只约束到本卡收口，后续卡的合法改动不算越界
+ACCEPT_COMMIT = "d9fbe48"
 SCHEMA_SHA256 = "c48c9d4886caf77908fe850229bc04ae9b7ea60b3750bdba707ff815fcea2a99"
-EXPECTED_PYTEST = "223 passed"
-EXPECTED_COLLECT = "227/231 tests collected"
 EXPECTED_IMPORTS = "3 kept, 0 broken"
 
 TRACE_FIELDS = [
@@ -560,11 +567,11 @@ def check_007() -> str:
 def check_008() -> str:
     """B1：`src/conversation_stream.py`、`src/conversation_graph.py` 零改动。"""
     paths = ["src/conversation_stream.py", "src/conversation_graph.py"]
-    diff = _git("diff", "--quiet", BASE_COMMIT, "--", *paths)
-    assert diff.returncode == 0, f"{BASE_COMMIT}..工作区有改动: {diff.stdout.strip()}"
+    diff = _git("diff", "--quiet", BASE_COMMIT, ACCEPT_COMMIT, "--", *paths)
+    assert diff.returncode == 0, f"{BASE_COMMIT}..{ACCEPT_COMMIT} 有改动: {diff.stdout.strip()}"
     status = _git("status", "--porcelain", "--", *paths).stdout.strip()
     assert not status, f"工作区有未提交改动: {status}"
-    return f"{BASE_COMMIT}..工作区：两文件 0 行差异；git status 空"
+    return f"{BASE_COMMIT}..{ACCEPT_COMMIT}：两文件 0 行差异；git status 空"
 
 
 def check_009() -> str:
@@ -582,15 +589,16 @@ def check_009() -> str:
 
 
 def check_010() -> str:
-    """B3：pytest 223 / collect 227/231 / lint-imports 3 kept / schema 哈希不变。"""
+    """B3：pytest / collect 与 `docs/baseline.md` §2 一致 / lint-imports 3 kept / schema 哈希不变。"""
+    exp = _baseline.expected()
     pytest_out = _run(["poetry", "run", "pytest", "-q", "-p", "no:cacheprovider"])
-    assert EXPECTED_PYTEST in pytest_out.stdout, (
+    assert exp["pytest"] in pytest_out.stdout, (
         f"pytest: {_last_line(pytest_out.stdout + pytest_out.stderr)}"
     )
     collect_out = _run(
         ["poetry", "run", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"]
     )
-    assert EXPECTED_COLLECT in collect_out.stdout, (
+    assert f"{exp['collect']} tests collected" in collect_out.stdout, (
         f"collect: {_last_line(collect_out.stdout + collect_out.stderr)}"
     )
     lint_out = _run(["poetry", "run", "lint-imports"])
@@ -600,7 +608,10 @@ def check_010() -> str:
     schema_out = _run(["poetry", "run", "python", "scripts/smoke_tools_schema.py"])
     assert SCHEMA_SHA256 in schema_out.stdout, "schema sha256 与基线不一致"
     assert "2558" in schema_out.stdout, "schema bytes 不是 2558"
-    return "pytest 223 passed；collect 227/231；lint-imports 3 kept；schema c48c9d48...2a99 / 2558B"
+    return (
+        f"pytest {exp['pytest']}；collect {exp['collect']}；lint-imports 3 kept；"
+        "schema c48c9d48...2a99 / 2558B"
+    )
 
 
 def check_011() -> str:

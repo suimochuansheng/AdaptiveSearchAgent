@@ -2,6 +2,15 @@
 
 基于 LangGraph 的自适应搜索 Agent，实现「规划 → 并行搜索 → 评估 → 重试 → 生成报告」闭环，支持本地知识库（RAG）与在线搜索（Tavily）双路并行。
 
+## 这是什么
+
+**会话式 Agent（LangGraph 主循环）+ 工具治理（注册表 / 权限 / 预算）+ 外层审批（HITL）。**
+
+- **225** 条单测：`pytest -q` -> 225 passed / 4 skipped / 4 deselected
+- **5** 份契约：`docs/contracts/`（approval / resume-http / runtime-event / tool-spec / trace-span）
+- **220+** 条台账用例：`tests/test_agent_cases/台账用例.csv`（GB18030，15 列）
+- **基线结论**：治理接入后未降质——A 9.70 / B 9.75 / C 9.85 vs raw 9.65（同裁判、同 20 题）
+
 ---
 
 AdaptiveSearchAgent搜索对话过程GIF（GIF加载慢，亦可进docs/screenshots/adaptive.gif 查看）
@@ -53,7 +62,7 @@ LLM 主模型 Ollama 失败后指数退避重试、自动切换 DeepSeek；LLM �
 | 置信度阈值 | 0.8（达到即停止搜索） |
 | Redis 锁 TTL | 600 秒 |
 | 代码规模 | 主服务约 3.5k 行（Python） |
-| 测试覆盖 | 14 个测试文件 |
+| 测试覆盖 | 28 个测试文件（收集 229 例） |
 
 ---
 
@@ -188,6 +197,34 @@ poetry run chainlit run frontend/app.py --port 8001
 
 ---
 
+## 三个 demo（可复制）
+
+### 1. 治理：四开关 + 审批卡片
+
+```bash
+ENABLE_TOOL_POLICY=1 ENABLE_TRACE=1 ENABLE_HITL=1 ENABLE_MCP=1 poetry run uvicorn api_main:app --port 8000
+poetry run chainlit run frontend/app.py --port 8001   # 另开终端，打开 http://localhost:8001
+# 问一句「用深度调研对比三款 GPU 的功耗与性能」-> 出现审批卡片，点「同意」继续
+```
+
+### 2. 生态：MCP 热插拔 + 降级
+
+```bash
+ENABLE_MCP=1 poetry run uvicorn api_main:app --port 8000   # 启动时拉起 scripts/mcp_server.py
+curl -s -X POST localhost:8000/chat/conversation -H 'Content-Type: application/json' \
+  -d '{"thread_id":"mcp-demo","message":"数一下这句话有几个字：工具治理与审批"}'   # word_count 工具
+pkill -f scripts/mcp_server.py   # 停 server；再问一次 -> 不崩（OI-UI-002：显式提示 P1 补）
+```
+
+### 3. 质量：直接看 §8 那张表
+
+```bash
+sed -n '/## 8. Agent 能力基线/,/^## /p' docs/baseline.md
+# A 全关 9.70 / B 治理 9.75 / C 治理+HITL 9.85 vs raw 9.65（裁判 qwen3.8-max-0902、同 20 题）
+```
+
+---
+
 ## 项目结构
 
 ```bash
@@ -201,7 +238,7 @@ AdaptiveSearchAgent/
 │   ├── agents/              # 6 个核心节点（planner/hitl_confirm/parallel_searcher/search_worker/evaluator/writer）+ tool_demo ReAct 演示
 │   ├── tools/               # RAG(HTTP)/Tavily/calculator
 │   └── utils/               # LLM 备援、JSON 容错、指标、日志
-├── tests/                   # 14 个测试文件
+├── tests/                   # 28 个测试文件
 ├── frontend/                # Chainlit 对话 UI
 └── scripts/                 # Ragas 离线评估等
 ```

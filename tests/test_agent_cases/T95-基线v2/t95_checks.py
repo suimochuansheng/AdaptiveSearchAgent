@@ -64,6 +64,8 @@ DEFAULT_REPORTS = REPO.parent / "文档" / "项目" / "AdaptiveSearchAgent" / "�
 
 REPORTS = Path(os.environ.get("T95_REPORTS_DIR", str(DEFAULT_REPORTS)))
 BASE_COMMIT = os.environ.get("T95_BASE_COMMIT", "101b69b")
+#: 本卡验收提交（G11）：台账比对只到本卡收口，后续卡追加的行不算改动
+ACCEPT_COMMIT = os.environ.get("T95_ACCEPT_COMMIT", "79c76db")
 EVAL_COMMIT = "24a916c"
 JUDGE = "qwen3.8-max-0902"
 BUCKETS = ("10", "9", "8", "7", "<=6")
@@ -395,29 +397,36 @@ def _check_ledger_shape(rows: list[list[str]]) -> None:
 def check_t95_010() -> str:
     if not LEDGER.is_file():
         raise CheckFailed(f"缺少台账 {LEDGER}")
-    proc = _git("show", f"{BASE_COMMIT}:tests/test_agent_cases/台账用例.csv")
-    if proc.returncode != 0:
-        detail = proc.stderr.decode("utf-8", "replace").strip()
+    base_proc = _git("show", f"{BASE_COMMIT}:tests/test_agent_cases/台账用例.csv")
+    if base_proc.returncode != 0:
+        detail = base_proc.stderr.decode("utf-8", "replace").strip()
         raise CheckFailed(f"git show {BASE_COMMIT} 台账失败：{detail}")
-    base_rows = _parse_csv(proc.stdout)
+    accept_proc = _git("show", f"{ACCEPT_COMMIT}:tests/test_agent_cases/台账用例.csv")
+    if accept_proc.returncode != 0:
+        detail = accept_proc.stderr.decode("utf-8", "replace").strip()
+        raise CheckFailed(f"git show {ACCEPT_COMMIT} 台账失败：{detail}")
+    base_rows = _parse_csv(base_proc.stdout)
+    accept_rows = _parse_csv(accept_proc.stdout)
     current_rows = _parse_csv(LEDGER.read_bytes())
-    if len(base_rows[0]) != 15 or len(current_rows[0]) != 15 or base_rows[0] != current_rows[0]:
+    if len(base_rows[0]) != 15 or len(accept_rows[0]) != 15 or base_rows[0] != accept_rows[0]:
         raise CheckFailed("台账表头与基线的 15 列不一致")
     base_data = base_rows[1:]
+    accept_data = accept_rows[1:]
     current_data = current_rows[1:]
     base_non_t95 = [row for row in base_data if not row[0].startswith("T95-")]
-    current_non_t95 = [row for row in current_data if not row[0].startswith("T95-")]
-    if current_non_t95 != base_non_t95:
+    accept_non_t95 = [row for row in accept_data if not row[0].startswith("T95-")]
+    if accept_non_t95 != base_non_t95:
         raise CheckFailed(
-            f"非 T95 行被改动：base {len(base_non_t95)} 行，now {len(current_non_t95)} 行"
+            f"非 T95 行被改动：base {len(base_non_t95)} 行，accept {len(accept_non_t95)} 行"
         )
     if len(base_non_t95) != 189:
         raise CheckFailed(f"{BASE_COMMIT} 台账数据行={len(base_non_t95)}，期望 189")
-    tail = _check_ledger_tail(current_data, len(current_non_t95))
+    tail = _check_ledger_tail(accept_data, len(accept_non_t95))
+    _check_ledger_shape(accept_data)
     _check_ledger_shape(current_data)
     return (
-        f"台账数据行 {len(base_data)} -> {len(current_data)}（T95 +{len(tail)}）；"
-        f"非 T95 行与 {BASE_COMMIT} 逐字段一致，15 列、case_id 唯一"
+        f"台账 {BASE_COMMIT} {len(base_data)} 行 -> {ACCEPT_COMMIT} {len(accept_data)} 行"
+        f"（T95 +{len(tail)}）；非 T95 行逐字段一致；当前 {len(current_data)} 行 15 列、case_id 唯一"
     )
 
 

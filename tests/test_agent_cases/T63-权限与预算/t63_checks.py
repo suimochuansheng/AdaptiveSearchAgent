@@ -43,6 +43,13 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[3]
 if str(REPO) not in sys.path:  # 让脚本在任意 cwd 下都能 import agent / src / config
     sys.path.insert(0, str(REPO))
+#: 卡级基线（pytest 通过数 / 收集数 / nodeids）唯一来源：`docs/baseline.md` §2。
+CASE_ROOT = REPO / "tests" / "test_agent_cases"
+if str(CASE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CASE_ROOT))
+
+import _baseline  # noqa: E402
+
 LEDGER = REPO / "tests" / "test_agent_cases" / "台账用例.csv"
 DEV_COMMIT = "423c1ea"
 BASELINE_SHA256 = "c48c9d4886caf77908fe850229bc04ae9b7ea60b3750bdba707ff815fcea2a99"
@@ -192,12 +199,12 @@ def check_002() -> str:
 
 
 def check_003() -> str:
-    """A2（后半）：全量 pytest 仍是 223 passed / 4 skipped / 4 deselected。"""
+    """A2（后半）：全量 pytest 与 `docs/baseline.md` §2 一致。"""
+    exp = _baseline.expected()
     proc = _run([sys.executable, "-m", "pytest", "-q"])
     last = _last_line(proc.stdout)
     assert proc.returncode == 0, f"pytest 退出码 {proc.returncode}：{last}"
-    for token in ("223 passed", "4 skipped", "4 deselected"):
-        assert token in last, f"末行缺少 {token}：{last}"
+    assert exp["pytest"] in last, f"末行缺少 {exp['pytest']}：{last}"
     return f"pytest -q 末行：{last}"
 
 
@@ -553,11 +560,12 @@ def check_013() -> str:
 
 
 def check_014() -> str:
-    """B3：pytest 223；collect 227/231；新增脚本不被收集。"""
+    """B3：pytest / collect 与 `docs/baseline.md` §2 一致；新增脚本不被收集。"""
+    exp = _baseline.expected()
     assert not Path(__file__).name.startswith("test_"), "检查脚本不能叫 test_*.py"
     collect = _run([sys.executable, "-m", "pytest", "--collect-only", "-q"])
     last_collect = _last_line(collect.stdout)
-    assert "227/231" in last_collect, f"收集数不是 227/231：{last_collect}"
+    assert exp["collect"] in last_collect, f"收集数不是 {exp['collect']}：{last_collect}"
     assert "4 deselected" in last_collect, f"deselected 不是 4：{last_collect}"
     assert "t63_checks" not in collect.stdout and "T63" not in collect.stdout, (
         "新增脚本被 pytest 收集了"
@@ -566,8 +574,8 @@ def check_014() -> str:
     full = _run([sys.executable, "-m", "pytest", "-q"])
     last_full = _last_line(full.stdout)
     assert full.returncode == 0, f"pytest 退出码 {full.returncode}：{last_full}"
-    assert "223 passed" in last_full, f"pytest 不是 223 passed：{last_full}"
-    return f"collect 227/231；pytest {last_full}；t63_checks.py 未被收集"
+    assert exp["pytest"] in last_full, f"pytest 与基线不符（期望 {exp['pytest']}）：{last_full}"
+    return f"collect {exp['collect']}；pytest {last_full}；t63_checks.py 未被收集"
 
 
 def check_015() -> str:

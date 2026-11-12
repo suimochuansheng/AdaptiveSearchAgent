@@ -70,6 +70,7 @@ PORTS = [
     "TaskStore",
     "MemoryStore",
     "EventBus",
+    "BudgetLedger",
 ]
 SIX_KINDS = {"token", "tool_call", "tool_result", "interrupt", "final", "error"}
 CONTRACT_TEST = ROOT / "tests" / "contracts" / "test_agent_runtime_contract.py"
@@ -137,7 +138,7 @@ def _last_line(output: str, needle: str) -> str:
 
 
 def check_a1() -> tuple[bool, str]:
-    """七个端口齐全、都是 @runtime_checkable、docstring 有三段契约。"""
+    """八个端口齐全、都是 @runtime_checkable、docstring 有三段契约。"""
     classes = _protocol_classes()
     missing = [name for name in PORTS if name not in classes]
     extra = sorted(set(classes) - set(PORTS))
@@ -155,9 +156,10 @@ def check_a1() -> tuple[bool, str]:
         if lack:
             no_sections[name] = lack
     ok = not missing and not extra and not no_checkable and not no_sections
+    total = len(PORTS)
     evidence = (
-        f"Protocol {len(classes)} 个（期望 7）；@runtime_checkable "
-        f"{len(PORTS) - len(no_checkable)}/7；三段契约 {len(PORTS) - len(no_sections)}/7"
+        f"Protocol {len(classes)} 个（期望 {total}）；@runtime_checkable "
+        f"{total - len(no_checkable)}/{total}；三段契约 {total - len(no_sections)}/{total}"
     )
     if missing:
         evidence += f"；缺端口 {missing}"
@@ -505,7 +507,7 @@ def check_tar014() -> tuple[bool, str]:
 
 
 CHECKS: list[tuple[str, Any]] = [
-    ("TAR-001 A1 七端口齐全 + @runtime_checkable + 三段契约", check_a1),
+    ("TAR-001 A1 八端口齐全 + @runtime_checkable + 三段契约", check_a1),
     ("TAR-002 A2 RuntimeEvent.kind 六值 / ping 不入事件", check_a2),
     ("TAR-003 A3 LangGraphRuntime 满足端口 / Fake 跑通 run_turn", check_a3),
     ("TAR-004 A4 ports.py 与 domain 零框架依赖", check_a4),

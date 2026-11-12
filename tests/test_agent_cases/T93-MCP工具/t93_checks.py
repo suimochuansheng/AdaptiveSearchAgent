@@ -91,6 +91,8 @@ EXPECTED_NAMES_WITH_MCP = BASELINE_NAMES + NEW_TOOLS
 
 #: 本卡开工 HEAD（交接单第 1 节）：所有"零改动"类断言都拿它当基准
 BASELINE_COMMIT = "7d02f24"
+#: 本卡验收提交（G8）：“零改动”只约束到本卡收口，后续卡的合法改动不算越界
+ACCEPT_COMMIT = "c95a71a"
 
 #: 契约 `ToolSpec` 九字段（docs/contracts/tool-spec.md §1，顺序即 dataclass 顺序）
 CONTRACT_FIELDS = [
@@ -304,7 +306,9 @@ def check_b4() -> bool:
     """B4：未改 src/tools/*、frontend/、hitl.py、approval_store.py。"""
     changed = [
         line
-        for line in git_out("diff", "--name-only", f"{BASELINE_COMMIT}..HEAD").splitlines()
+        for line in git_out(
+            "diff", "--name-only", f"{BASELINE_COMMIT}..{ACCEPT_COMMIT}"
+        ).splitlines()
         if line
     ]
     forbidden_re = re.compile(
@@ -315,7 +319,7 @@ def check_b4() -> bool:
     forbidden_grep = git_out(
         "diff",
         "--name-only",
-        f"{BASELINE_COMMIT}..HEAD",
+        f"{BASELINE_COMMIT}..{ACCEPT_COMMIT}",
         "--",
         "src/tools",
         "frontend",
@@ -356,7 +360,11 @@ def check_b5() -> bool:
     commits = [
         line
         for line in git_out(
-            "log", "--format=%s", f"{BASELINE_COMMIT}..HEAD", "--", str(LEDGER.relative_to(REPO))
+            "log",
+            "--format=%s",
+            f"{BASELINE_COMMIT}..{ACCEPT_COMMIT}",
+            "--",
+            str(LEDGER.relative_to(REPO)),
         ).splitlines()
         if line
     ]
