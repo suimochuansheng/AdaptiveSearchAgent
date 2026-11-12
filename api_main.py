@@ -279,6 +279,8 @@ async def lifespan(app: FastAPI):
     logger.info("后台清理任务已启动")
     # 3. MCP 工具热插拔（T9-3）：默认关闭；失败只 warning，不阻塞启动
     await _register_mcp_tools()
+    # 4. 子代理工具（T9-4）：默认关闭；开启时登记 subagent_task 并重建会话图
+    _register_subagent_tool()
     logger.info("FastAPI 启动完成")
 
     yield  #  FastAPI 应用启动时从开头执行到这里，关闭时从这里继续执行到末尾
@@ -764,6 +766,26 @@ async def _register_mcp_tools() -> None:
         # 图是单例缓存：不重置的话模型下一轮仍然只看到旧工具（OI-P-006）
         reset_conversation_graph()
         logger.info("MCP 工具已热注册：%s", registered)
+
+
+def _register_subagent_tool() -> bool:
+    """启动阶段登记子代理工具（T9-4），只有 `ENABLE_SUBAGENT=True` 才会走到登记。
+
+    Returns:
+        本次是否真的登记（开关关闭 / 已登记时 False）。
+    """
+    if not settings.ENABLE_SUBAGENT:
+        return False
+
+    from agent.adapters.tools.subagent import register_subagent_tool
+
+    if not register_subagent_tool():
+        return False
+
+    # 图是单例缓存：不重置的话模型下一轮仍然看不到 subagent_task
+    reset_conversation_graph()
+    logger.info("子代理工具已登记：subagent_task（独立上下文 + 摘要回传，递归上限 1 层）")
+    return True
 
 
 @app.post("/chat/conversation")

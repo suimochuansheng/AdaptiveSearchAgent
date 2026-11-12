@@ -176,6 +176,15 @@ class Settings(BaseSettings):
     MCP_TIMEOUT_SECONDS: float = 10.0
     # MCP 工具单次输出上限（token，进 ToolSpec 供预算使用）
     MCP_MAX_OUTPUT_TOKENS: int = 2000
+    # 子代理工具（T9-4）：默认关闭；关时注册表仍是 5 个内置工具、schema 哈希不变。
+    # 开启后启动阶段把 subagent_task 登记进注册表并重建会话图（与 MCP 同一套做法）。
+    ENABLE_SUBAGENT: bool = False
+    # 子代理单次任务最多跑几轮（agent ⇄ tools 循环；每轮 = 模型 + 工具两步）
+    SUBAGENT_MAX_TURNS: int = 8
+    # 子代理回传主会话的摘要上限（token）：超了保留首尾、中间标“已截断”
+    SUBAGENT_MAX_OUTPUT_TOKENS: int = 1500
+    # 子代理单次任务的总超时（秒）；超时返回可读错误，不抛栈
+    SUBAGENT_TIMEOUT_SECONDS: int = 300
     # span 落盘目录（每 span 一行 JSON：<TRACE_DIR>/<YYYY-MM-DD>.jsonl）；logs/ 已被 gitignore
     TRACE_DIR: str = "logs/trace"
     # 单轮工具调用上限（达到后本轮后续调用直接拒绝）
