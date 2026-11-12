@@ -281,6 +281,8 @@ async def lifespan(app: FastAPI):
     await _register_mcp_tools()
     # 4. 子代理工具（T9-4）：默认关闭；开启时登记 subagent_task 并重建会话图
     _register_subagent_tool()
+    # 5. Skills 工具（T6-4）：默认关闭；开启时登记 list_skills / load_skill 并重建会话图
+    _register_skills_tools()
     logger.info("FastAPI 启动完成")
 
     yield  #  FastAPI 应用启动时从开头执行到这里，关闭时从这里继续执行到末尾
@@ -785,6 +787,26 @@ def _register_subagent_tool() -> bool:
     # 图是单例缓存：不重置的话模型下一轮仍然看不到 subagent_task
     reset_conversation_graph()
     logger.info("子代理工具已登记：subagent_task（独立上下文 + 摘要回传，递归上限 1 层）")
+    return True
+
+
+def _register_skills_tools() -> bool:
+    """启动阶段登记 Skills 工具（T6-4），只有 `ENABLE_SKILLS=True` 才会走到登记。
+
+    Returns:
+        本次是否真的登记（开关关闭 / 已登记时 False）。
+    """
+    if not settings.ENABLE_SKILLS:
+        return False
+
+    from agent.adapters.tools.skills_tools import register_skills_tools
+
+    if not register_skills_tools():
+        return False
+
+    # 图是单例缓存：不重置的话模型下一轮仍然看不到 list_skills / load_skill
+    reset_conversation_graph()
+    logger.info("Skills 工具已登记：list_skills / load_skill（渐进披露，正文按需读取）")
     return True
 
 

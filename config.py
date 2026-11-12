@@ -258,6 +258,17 @@ class Settings(BaseSettings):
     # 异步任务触发阈值（秒），超过此阈值的请求将转换为后台任务
     ASYNC_TASK_THRESHOLD_SECONDS: int = 120
 
+    # ── 新功能开关：Skills 加载（T6-4）──
+    # 默认关闭；关时注册表仍是 5 个内置工具、schema 哈希不变。
+    # 开启后启动阶段登记 list_skills / load_skill 并重建会话图（与 MCP / 子代理同一套做法）。
+    ENABLE_SKILLS: bool = False
+    # 技能包根目录（相对路径按仓库根解析）；每个子目录一个 SKILL.md
+    SKILLS_DIR: str = "skills"
+    # list_skills 最多返回多少条索引（控制工具输出，不把全部技能塞进上下文）
+    SKILLS_INDEX_MAX: int = 30
+    # 单个技能正文的 token 上限；超出截断并加标记
+    SKILL_MAX_BODY_TOKENS: int = 2000
+
 
 # 全局单例，项目各处从此导入
 settings = Settings()
