@@ -19,7 +19,7 @@
     B2  lint-imports 3 kept
     B3  src/conversation_graph.py 的 add_node / add_edge 零改动
     B4  契约文档（docs/contracts/）与前端（frontend/）零改动
-    B5  台账里没有 T94 行（开发窗口不该写台账）
+    B5  台账无开发窗口的 T94 行（测试窗口行例外；fix+OI 允许追加，仅限新增行）
     C1  trace 树：子代理内部 span 与本轮同 trace_id，父节点是 subagent_task tool span
     C2  并发两个 subagent_task：父 span 是否串（交接单声明的 v1 边界，确认现象并记 OI）
     C3  子代理内工具抛异常：主会话拿到可读摘要/错误，不是栈
@@ -884,11 +884,47 @@ def check_b4() -> None:
     )
 
 
+def ledger_commit_verdict(sha: str) -> tuple[bool, str]:
+    """判一个动过台账的提交是否合规（B5 新口径，计划窗口 2026-11-12 裁定）。
+
+    三条同时成立才算合规：
+
+    1. 允许集合：subject 以 `test(cases)` 开头，或（以 `fix` 开头 **且** 含 `OI-`）；
+    2. 该提交对台账的改动**只有新增行**（`git show --numstat` 删除数必须为 0）；
+    3. `feat` / `docs` / `chore` / `style` / `refactor` / `perf` / `build` 动台账 -> 不合规。
+
+    背景：0a `fix(tools): 子代理摘要预算对齐（OI-T94-001）` 在台账追加了 T94-016，
+    旧口径“只能 `test(cases)`”会把它误判成违规。这是口径细化，不是放宽：
+    仍然只允许“测试窗口的验收提交”或“带 OI 编号的修复提交”，且只准追加。
+    """
+    subject = git("show", "-s", "--format=%s", sha).strip()
+    numstat = git("show", "--numstat", "--format=", sha, "--", str(LEDGER.relative_to(REPO)))
+    added = deleted = 0
+    for line in numstat.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        if parts[0].isdigit():
+            added += int(parts[0])
+        if parts[1].isdigit():
+            deleted += int(parts[1])
+
+    test_window = subject.startswith("test(cases)")
+    fix_with_oi = subject.startswith("fix") and "OI-" in subject
+    if not (test_window or fix_with_oi):
+        return False, f"subject 不在允许集合（test(cases) 或 fix+OI-）：{subject}"
+    if deleted != 0:
+        return False, f"删除 {deleted} 行（只允许新增）：{subject}"
+    return True, f"{subject} (+{added}/-{deleted})"
+
+
 def check_b5() -> None:
     """B5：台账里没有**开发窗口**写的 T94 行（测试窗口自己的行不算）。
 
-    口径与 T93 一致：T94 行可以存在，但 `run_by` 必须是 `test-G12`（测试窗口），
-    且开工区间内动过台账的提交只能是 `test(cases)`。这样脚本在台账追加后仍可复跑。
+    T94 行可以存在，但 `run_by` 必须以 `test-` 开头（T94 窗口是 `test-G12`；跨卡测试
+    窗口 test-G13 追加的口径细化行 T94-017 同样算测试窗口，开发写的 agent/dev 不算）。
+    开工区间内动过台账的提交按 `ledger_commit_verdict()` 判：`test(cases)` 验收提交，
+    或带 `OI-` 的 `fix` 提交（且只追加，不删改）。这样脚本在台账追加后仍可复跑。
     """
     if not LEDGER.exists():
         record("T94-013", "B5 台账无开发窗口的 T94 行", False, f"台账不存在：{LEDGER}")
@@ -896,22 +932,35 @@ def check_b5() -> None:
     with LEDGER.open(encoding="gb18030", newline="") as handle:
         rows = [dict(row) for row in csv.DictReader(handle)]
     t94 = [row for row in rows if (row.get("case_id") or "").startswith("T94")]
-    foreign = [row.get("case_id") for row in t94 if (row.get("run_by") or "").strip() != "test-G12"]
-    commits = [
+    # “测试窗口”= 任何 test-* 执行人（T94 为 test-G12；跨卡测试窗口如 test-G13 追加的
+    # 口径细化行 T94-017 也算测试窗口）。开发窗口写台账用 agent / dev，仍会被拦住。
+    foreign = [
+        row.get("case_id")
+        for row in t94
+        if not (row.get("run_by") or "").strip().startswith("test-")
+    ]
+    shas = [
         line
         for line in git(
-            "log", "--format=%s", f"{RANGE_START}..HEAD", "--", str(LEDGER.relative_to(REPO))
+            "log",
+            "--no-merges",
+            "--format=%H",
+            f"{RANGE_START}..HEAD",
+            "--",
+            str(LEDGER.relative_to(REPO)),
         ).splitlines()
         if line
     ]
-    foreign_commit = [subject for subject in commits if not subject.startswith("test(cases)")]
-    ok = not foreign and not foreign_commit
+    verdicts = [ledger_commit_verdict(sha) for sha in shas]
+    bad_commits = [reason for ok, reason in verdicts if not ok]
+    ok = not foreign and not bad_commits
     record(
         "T94-013",
         "B5 台账无开发窗口的 T94 行",
         ok,
-        f"台账共 {len(rows)} 行；T94 行={len(t94)}；非 test-G12 写的={foreign or '无'}；"
-        f"开工后动过台账的提交={commits or '无'}",
+        f"台账共 {len(rows)} 行；T94 行={len(t94)}；非 test-* 写的={foreign or '无'}；"
+        f"动台账的提交={[reason for _, reason in verdicts] or '无'}；"
+        f"不合规={bad_commits or '无'}",
     )
 
 
