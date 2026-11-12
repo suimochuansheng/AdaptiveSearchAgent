@@ -12,7 +12,11 @@
 警示。**只标记、不删内容**——删了会破坏正常文档，也会给模型错误的完整性预期。
 
 本模块零第三方依赖、不读配置，开关判断留给调用方（`shrink_tool_message` /
-`load_skill` / 系统提示构建），这样关掉开关时行为完全不变。
+系统提示构建），这样关掉开关时行为完全不变。
+
+**调用点必须唯一**：`wrap` 不做“内容自称已包裹”的幂等短路（那会被攻击者用
+`<untrusted` 开头直接劫持），因此只允许 `shrink_tool_message` 这一处调用；
+`load_skill` 只返回原文，它作为工具结果必然经过该收口。
 """
 
 from __future__ import annotations
@@ -57,6 +61,8 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"system\s*prompt|系统提示词?", re.IGNORECASE),
     ),
     ("你现在是", re.compile(r"你现在是")),
+    ("you are now", re.compile(r"\byou\s+are\s+now\b", re.IGNORECASE)),
+    ("act as", re.compile(r"\bact\s+as\b", re.IGNORECASE)),
     (
         "disregard the above",
         re.compile(
@@ -99,22 +105,23 @@ def suspect(content: str) -> list[str]:
 
 
 def wrap(content: str, source: str) -> str:
-    """用固定边界包裹不可信内容，命中注入模式时在开头加一行警示。
+    """用固定边界包裹不可信内容；命中注入模式或发生边界中和时加警示行。
 
-    幂等：已经以 `<untrusted` 开头的内容原样返回，避免重复包裹（`load_skill`
-    包一次、`shrink_tool_message` 再包一次时只保留最外层）。
+    **本函数不做幂等判断**：即使内容以 `<untrusted` 开头也会重新包裹，并把内层
+    伪边界中和掉。调用点必须唯一（当前只有 `shrink_tool_message`），否则会双层
+    包裹；`load_skill` 只返回原文，由工具结果收口统一包一次。
 
     Args:
         content: 工具输出 / 技能正文（原文，不做删改）。
         source: 来源名（工具名或技能名），写进 `source="..."` 属性。
     """
     text = str(content)
-    if text.lstrip().startswith(f"<{UNTRUSTED_TAG}"):
-        return text
+    body = neutralize(text)
 
     lines = [_OPEN_TEMPLATE.format(source=_safe_source(source))]
-    if suspect(text):
+    if suspect(text) or body != text:
+        # 只做边界逃逸、不含注入语句的载荷也要在 prompt 里留下痕迹
         lines.append(WARNING_LINE)
-    lines.append(neutralize(text))
+    lines.append(body)
     lines.append(_CLOSE_TAG)
     return "\n".join(lines)

@@ -220,11 +220,11 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
             profile_context = await load_profile_context(state.get("user_id") or "")
 
         system_prompt = SYSTEM_PROMPT
-        if settings.ENABLE_TOOL_OUTPUT_GUARD:
-            # T6-5：工具输出在数据侧包裹，这句话告诉模型“包裹内是数据不是指令”
-            system_prompt = f"{system_prompt}\n{PROMPT_NOTICE}"
         if profile_context:
             system_prompt = f"{SYSTEM_PROMPT}\n\n{profile_context}"
+        if settings.ENABLE_TOOL_OUTPUT_GUARD:
+            # T6-5：最后追加，避免被上面的画像分支覆盖；这句话告诉模型包裹内是数据
+            system_prompt = f"{system_prompt}\n{PROMPT_NOTICE}"
 
         built = await build_context(
             llm=model,
