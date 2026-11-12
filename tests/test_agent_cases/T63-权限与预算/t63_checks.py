@@ -499,13 +499,18 @@ def check_011() -> str:
 
 
 def check_012() -> str:
-    """B1：src/tools 零改动；conversation_graph diff 仅 contextvar 相关行。"""
+    """B1：src/tools 零改动；conversation_graph diff 仅 contextvar 相关行。
+
+    第一条断言看 ``DEV_COMMIT`` 的历史（T6-3 开发提交本身没碰 src/tools）；
+    第二条断言判的是**未提交**改动（``git status``），不是与 ``DEV_COMMIT`` 的历史
+    差异——后者会因后续合法提交（如 c0fefec 改 offload.py）永久变红。
+    """
     changed = _git("show", "--name-only", "--format=", DEV_COMMIT).stdout.splitlines()
     touched = [name for name in changed if name.startswith("src/tools/")]
     assert not touched, f"src/tools 被改动：{touched}"
 
-    dirty = _git("diff", "--name-only", DEV_COMMIT, "--", "src/tools").stdout.splitlines()
-    assert not dirty, f"工作区 src/tools 仍有改动：{dirty}"
+    dirty = _git("status", "--porcelain", "--", "src/tools").stdout.splitlines()
+    assert not dirty, f"工作区 src/tools 有未提交改动：{dirty}"
 
     diff = _git("show", DEV_COMMIT, "--", "src/conversation_graph.py").stdout
     added = [
@@ -532,7 +537,9 @@ def check_012() -> str:
     assert len(removed) == 2, f"删除行数不是 2：{removed}"
     assert set(removed) <= allowed_removed, f"出现 contextvar 之外的删除：{removed}"
     assert "        thread_id = str(" in diff, "thread_id 取值行应保持为上下文（未改）"
-    return "src/tools 0 文件；conversation_graph +3/-2（import/with/result），thread_id 行未变"
+    return (
+        "src/tools 无未提交改动；conversation_graph +3/-2（import/with/result），thread_id 行未变"
+    )
 
 
 def check_013() -> str:
@@ -579,7 +586,7 @@ def check_014() -> str:
 
 
 def check_015() -> str:
-    """B4：开发提交没有写 T63 台账行；工作区 T63 行只能由 test-G5 写入。"""
+    """B4：开发提交没有写 T63 台账行；工作区 T63 行只能由 test-G5 或 D15 授权行写入。"""
     commit_text = _git("show", f"{DEV_COMMIT}:tests/test_agent_cases/台账用例.csv").stdout
     assert "T63" not in commit_text, "开发提交里已经出现 T63 行"
 
@@ -588,9 +595,19 @@ def check_015() -> str:
 
     rows = list(csv.reader(io.StringIO(LEDGER.read_text(encoding="gb18030"))))
     t63_rows = [row for row in rows if row and row[0].startswith("T63-")]
-    foreign = [row[0] for row in t63_rows if len(row) > 12 and row[12] != "test-G5"]
-    assert not foreign, f"T63 行不是本窗口写的：{foreign}"
-    return f"dev 提交 T63 行 0、未改台账；工作区 T63 行 {len(t63_rows)}（run_by 均为 test-G5）"
+    # 例外：计划窗口 D15 授权行（run_by 非 test-G5，但 notes 带授权标记）。
+    foreign = [
+        row[0]
+        for row in t63_rows
+        if len(row) > 12
+        and row[12] != "test-G5"
+        and "计划窗口授权（D15）" not in (row[13] if len(row) > 13 else "")
+    ]
+    assert not foreign, f"T63 行不是本窗口或 D15 授权写的：{foreign}"
+    return (
+        f"dev 提交 T63 行 0、未改台账；工作区 T63 行 {len(t63_rows)}"
+        "（run_by 为 test-G5 或 D15 授权）"
+    )
 
 
 # ── C 类：5 条边界 / 反例 ────────────────────────────────────────────
