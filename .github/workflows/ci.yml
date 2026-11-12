@@ -6,9 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -58,3 +63,25 @@ jobs:
             --cov=src \
             --cov-report=term-missing \
             --cov-fail-under=60
+      - name: Architecture contracts (import-linter)
+        run: poetry run lint-imports
+      - name: T11 three-layer skeleton / dependency rules
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          REDIS_URL: redis://localhost:6379/0
+        run: poetry run python "tests/test_agent_cases/T11-三层骨架+依赖规则/t11_checks.py"
+      - name: T12 frozen contracts
+        run: poetry run python "tests/test_agent_cases/T12-契约冻结/t12_checks.py"
+      - name: T63 permissions and budget
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          REDIS_URL: redis://localhost:6379/0
+        run: poetry run python "tests/test_agent_cases/T63-权限与预算/t63_checks.py"
+      - name: Ledger health check
+        run: poetry run python scripts/ci_check_ledger.py
