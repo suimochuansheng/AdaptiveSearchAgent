@@ -7,7 +7,8 @@ v1 刻意做小（不改图结构、不做子代理专用工具集）：
 - 初始消息只放 `goal + constraints`，**不塞主会话历史**——上下文隔离就是这一条；
 - 子代理与主 Agent 共用同一套工具（含子代理自己），所以必须有**递归守卫**：
   `contextvars` 记深度，同一调用栈里已有子代理时直接返回可读错误（深度上限 1 层）；
-- 只回最后一条 AI 消息，并截断到 `SUBAGENT_MAX_OUTPUT_TOKENS`；
+- 只回最后一条 AI 消息，并截断到**生效上限** `SUBAGENT_EFFECTIVE_MAX_OUTPUT_TOKENS`
+  （启动时按 `tool_output_token_budget` 夹紧，避免进主会话被二次压缩）；
 - 超时 / 异常一律返回可读错误字符串（不抛栈），主会话不会因为子任务失败而挂掉。
 
 追踪（T7-0）关联：子代理内部的 span 必须落在**本轮同一个 trace_id** 下，且父节点是
@@ -72,7 +73,8 @@ async def subagent_task(goal: str, constraints: str = "") -> str:
         constraints: 可选约束（输出格式 / 边界 / 不要做什么）。
 
     Returns:
-        结论摘要（≤ `SUBAGENT_MAX_OUTPUT_TOKENS`）；失败 / 超时 / 嵌套时返回可读错误文案。
+        结论摘要（<= 生效上限 `SUBAGENT_EFFECTIVE_MAX_OUTPUT_TOKENS`）；
+        失败 / 超时 / 嵌套时返回可读错误文案。
     """
     if _DEPTH.get() >= 1:
         logger.warning("子代理递归调用被拒绝：%s", str(goal)[:80])
@@ -101,7 +103,9 @@ async def subagent_task(goal: str, constraints: str = "") -> str:
     finally:
         _DEPTH.reset(token)
 
-    return _truncate_summary(summary, settings.SUBAGENT_MAX_OUTPUT_TOKENS)
+    # 用生效值（启动时按 tool_output_token_budget 夹紧）：摘要进主会话会过
+    # shrink_tool_message，超预算会被二次压缩，截断标记会丢。
+    return _truncate_summary(summary, settings.SUBAGENT_EFFECTIVE_MAX_OUTPUT_TOKENS)
 
 
 # ── 对外：登记（只在 ENABLE_SUBAGENT=True 时生效）────────────────────
@@ -151,7 +155,7 @@ def _build_spec() -> ToolSpec:
         permission="external",
         cost_model=CostModel(unit="call", unit_cost=0.0),
         timeout_seconds=settings.SUBAGENT_TIMEOUT_SECONDS,
-        max_output_tokens=settings.SUBAGENT_MAX_OUTPUT_TOKENS,
+        max_output_tokens=settings.SUBAGENT_EFFECTIVE_MAX_OUTPUT_TOKENS,
         requires_approval=False,
         feature_flag="ENABLE_SUBAGENT",
     )

@@ -9,6 +9,10 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
+from src.utils.logger import get_logger
+
+logger = get_logger()
+
 
 class LLMProvider(StrEnum):
     OLLAMA = "ollama"
@@ -76,6 +80,30 @@ class Settings(BaseSettings):
     def _fill_eval_judge_model(self) -> "Settings":
         if not self.EVAL_JUDGE_MODEL:
             self.EVAL_JUDGE_MODEL = self.ALIYUN_QWEN_MODEL_NAME
+        return self
+
+    @model_validator(mode="after")
+    def _clamp_subagent_output_budget(self) -> "Settings":
+        """把子代理摘要上限夹到主会话工具输出预算之下。
+
+        原因：摘要进主会话会过 `shrink_tool_message`，超预算会被二次压缩，
+        `…（已截断）` 标记与首尾保留都会丢；这里在启动时一次性告警并夹紧生效值。
+        """
+        raw = int(self.SUBAGENT_MAX_OUTPUT_TOKENS)
+        budget = int(self.tool_output_token_budget)
+        effective = raw
+        if raw >= budget:
+            # 留 100 token 余量：主会话还会在摘要之外拼工具消息模板/指针。
+            effective = max(1, budget - 100)
+            logger.warning(
+                "SUBAGENT_MAX_OUTPUT_TOKENS=%s 不小于 tool_output_token_budget=%s；"
+                "摘要进主会话会被 shrink_tool_message 二次压缩（截断标记会丢），"
+                "已将生效值夹紧为 %s",
+                raw,
+                budget,
+                effective,
+            )
+        self.SUBAGENT_EFFECTIVE_MAX_OUTPUT_TOKENS = effective
         return self
 
     # 结果可信度阈值（0~1）
@@ -181,8 +209,13 @@ class Settings(BaseSettings):
     ENABLE_SUBAGENT: bool = False
     # 子代理单次任务最多跑几轮（agent ⇄ tools 循环；每轮 = 模型 + 工具两步）
     SUBAGENT_MAX_TURNS: int = 8
-    # 子代理回传主会话的摘要上限（token）：超了保留首尾、中间标“已截断”
-    SUBAGENT_MAX_OUTPUT_TOKENS: int = 1500
+    # 子代理回传主会话的摘要上限（token）：超了保留首尾、中间标“已截断”。
+    # 摘要进主会话会过 shrink_tool_message，超预算会被二次压缩，截断标记会丢；
+    # 所以默认 1000 必须小于 tool_output_token_budget（1200），并在启动时校验。
+    SUBAGENT_MAX_OUTPUT_TOKENS: int = 1000
+    # 生效值：_clamp_subagent_output_budget 按主会话工具输出预算夹紧后的值。
+    # 业务代码只读它，不要直接读上面的原始配置。
+    SUBAGENT_EFFECTIVE_MAX_OUTPUT_TOKENS: int = 1000
     # 子代理单次任务的总超时（秒）；超时返回可读错误，不抛栈
     SUBAGENT_TIMEOUT_SECONDS: int = 300
     # span 落盘目录（每 span 一行 JSON：<TRACE_DIR>/<YYYY-MM-DD>.jsonl）；logs/ 已被 gitignore
