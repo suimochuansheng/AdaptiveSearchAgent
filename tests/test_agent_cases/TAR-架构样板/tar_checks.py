@@ -368,12 +368,12 @@ def check_b5() -> tuple[bool, str]:
         digest = _baseline.assert_nodeids_sha()
     except _baseline.BaselineError as exc:
         return False, f"nodeids 校验失败：{exc}"
-    pytest_ok = exp["pytest"] in _MEASURED["summary"]
+    pytest_ok, pytest_detail = _baseline.pytest_matches(_MEASURED["summary"])
     collect_ok = exp["collect"] == _MEASURED["collect"]
     sha_ok = digest == exp["nodeids_sha256"]
     ok = pytest_ok and collect_ok and sha_ok
     evidence = (
-        f"解析 pytest「{exp['pytest']}」/ collect「{exp['collect']}」/ "
+        f"pytest {pytest_detail}；collect「{exp['collect']}」/ "
         f"sha256 {digest[:8]}…；与实测一致 pytest={pytest_ok} "
         f"collect={collect_ok} sha={sha_ok}"
     )

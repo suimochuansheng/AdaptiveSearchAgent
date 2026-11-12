@@ -35,6 +35,8 @@ __all__ = [
     "expected",
     "parse",
     "parse_file",
+    "pytest_matches",
+    "pytest_numbers",
 ]
 
 #: `tests/test_agent_cases/_baseline.py` -> 仓库根 -> `docs/baseline.md`
@@ -49,6 +51,13 @@ _HEX64 = re.compile(r"\b([0-9a-f]{64})\b")
 _RATIO = re.compile(r"(\d+)\s*/\s*(\d+)")
 _PASSED = re.compile(r"(\d+)\s+passed")
 _LINES = re.compile(r"(\d+)\s*行")
+#: pytest 末行的四个计数项；缺项按 0 处理（短形式如 "225 passed, 4 deselected"）。
+_COUNTS = {
+    "passed": re.compile(r"(\d+)\s+passed"),
+    "failed": re.compile(r"(\d+)\s+failed"),
+    "skipped": re.compile(r"(\d+)\s+skipped"),
+    "deselected": re.compile(r"(\d+)\s+deselected"),
+}
 
 
 class BaselineError(RuntimeError):
@@ -159,6 +168,39 @@ def parse_file(path: str | Path | None = None) -> dict[str, Any]:
 def expected(path: str | Path | None = None) -> dict[str, Any]:
     """返回 `docs/baseline.md` §2 的基线值（每次重读，避免进程内缓存过期）。"""
     return parse_file(path)
+
+
+def pytest_numbers(summary: str) -> dict[str, int]:
+    """从 pytest 末行解析 passed / failed / skipped / deselected（缺省为 0）。"""
+    numbers = {"passed": 0, "failed": 0, "skipped": 0, "deselected": 0}
+    for name, pattern in _COUNTS.items():
+        match = pattern.search(summary)
+        if match is not None:
+            numbers[name] = int(match.group(1))
+    return numbers
+
+
+def pytest_matches(summary: str) -> tuple[bool, str]:
+    """把末行与 docs/baseline.md §2 的 pytest 值比较。
+
+    判据：failed == 0 且 passed == 基线 passed 且 deselected == 基线 deselected。
+    skipped **不参与比较**（它是环境函数：CI 缺服务会多跳），只放进返回的说明里。
+    返回 (是否一致, 说明串)。
+    """
+    base = pytest_numbers(str(expected()["pytest"]))
+    got = pytest_numbers(summary)
+    ok = (
+        got["failed"] == 0
+        and got["passed"] == base["passed"]
+        and got["deselected"] == base["deselected"]
+    )
+    detail = (
+        f"passed={got['passed']}/{base['passed']}"
+        f" skipped={got['skipped']}（环境，不比）"
+        f" failed={got['failed']}"
+        f" deselected={got['deselected']}/{base['deselected']}"
+    )
+    return ok, detail
 
 
 def assert_nodeids_sha(path: str | Path | None = None) -> str:

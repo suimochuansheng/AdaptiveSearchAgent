@@ -328,12 +328,12 @@ def check_008() -> tuple[bool, str]:
 
 
 def check_009() -> tuple[bool, str]:
-    """pytest -q 末行与 `docs/baseline.md` §2 一致。"""
-    exp = _baseline.expected()
+    """pytest -q 末行与 `docs/baseline.md` §2 一致（数字比较，skipped 不比）。"""
     code, out = _run(_pytest_cmd("-q"), timeout=900)
     summary = _last_summary(out)
-    ok = code == 0 and exp["pytest"] in summary
-    return ok, f"EXIT={code}；末行 {summary}（baseline.md: {exp['pytest']}）"
+    matched, detail = _baseline.pytest_matches(summary)
+    ok = code == 0 and matched
+    return ok, f"EXIT={code}；{detail}；末行 {summary}"
 
 
 def check_010() -> tuple[bool, str]:

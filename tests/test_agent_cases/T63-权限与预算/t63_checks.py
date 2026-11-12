@@ -199,12 +199,12 @@ def check_002() -> str:
 
 
 def check_003() -> str:
-    """A2（后半）：全量 pytest 与 `docs/baseline.md` §2 一致。"""
-    exp = _baseline.expected()
+    """A2（后半）：全量 pytest 与 `docs/baseline.md` §2 一致（数字比较，skipped 不比）。"""
     proc = _run([sys.executable, "-m", "pytest", "-q"])
     last = _last_line(proc.stdout)
     assert proc.returncode == 0, f"pytest 退出码 {proc.returncode}：{last}"
-    assert exp["pytest"] in last, f"末行缺少 {exp['pytest']}：{last}"
+    ok, detail = _baseline.pytest_matches(last)
+    assert ok, detail
     return f"pytest -q 末行：{last}"
 
 
@@ -581,7 +581,8 @@ def check_014() -> str:
     full = _run([sys.executable, "-m", "pytest", "-q"])
     last_full = _last_line(full.stdout)
     assert full.returncode == 0, f"pytest 退出码 {full.returncode}：{last_full}"
-    assert exp["pytest"] in last_full, f"pytest 与基线不符（期望 {exp['pytest']}）：{last_full}"
+    ok, detail = _baseline.pytest_matches(last_full)
+    assert ok, detail
     return f"collect {exp['collect']}；pytest {last_full}；t63_checks.py 未被收集"
 
 

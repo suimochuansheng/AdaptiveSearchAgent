@@ -592,9 +592,8 @@ def check_010() -> str:
     """B3：pytest / collect 与 `docs/baseline.md` §2 一致 / lint-imports 3 kept / schema 哈希不变。"""
     exp = _baseline.expected()
     pytest_out = _run(["poetry", "run", "pytest", "-q", "-p", "no:cacheprovider"])
-    assert exp["pytest"] in pytest_out.stdout, (
-        f"pytest: {_last_line(pytest_out.stdout + pytest_out.stderr)}"
-    )
+    pytest_ok, pytest_detail = _baseline.pytest_matches(pytest_out.stdout)
+    assert pytest_ok, pytest_detail
     collect_out = _run(
         ["poetry", "run", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"]
     )
