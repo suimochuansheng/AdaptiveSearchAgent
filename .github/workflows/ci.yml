@@ -40,7 +40,10 @@ jobs:
           --health-retries 5
 
     steps:
+      # T63-012 / T63-015 要用 `git show 423c1ea`，默认 depth=1 的浅克隆取不到该提交
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
