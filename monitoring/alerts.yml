@@ -1,0 +1,44 @@
+# Prometheus 告警规则（B 卡：指标 + 告警）
+#
+# 指标由 `agent/observability/metrics.py` 暴露（默认 REGISTRY，`GET /metrics`）。
+# 三条规则的阈值都按「单题评测 ≈ 30s、单题成本远低于 1 元」的量级设定，
+# 且都能被真实流量触发（不会设成永远碰不到的值）。
+groups:
+  - name: agent-observability
+    rules:
+      - alert: AgentErrorRateHigh
+        # 错误数（transient + fatal）/ 请求数；分母 clamp_min 防止无流量时除零。
+        expr: sum(rate(agent_errors_total[5m])) / clamp_min(sum(rate(agent_requests_total[5m])), 0.001) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent 错误率超过 5%（持续 10 分钟）"
+          description: >-
+            5 分钟窗口错误率 > 5% 且持续 10 分钟。20 题一轮的评测里 1 题失败就是 5%，
+            偶发单题抖动会被 for: 10m 过滤掉；能持续 10 分钟说明是系统性问题
+            （模型/检索/网络），不是个例。
+
+      - alert: AgentLatencyP95High
+        # 请求耗时直方图的 p95；只按 le 聚合，不按 endpoint（当前只有 conversation）。
+        expr: histogram_quantile(0.95, sum(rate(agent_request_duration_seconds_bucket[5m])) by (le)) > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent 请求 p95 超过 60 秒（持续 10 分钟）"
+          description: >-
+            单题评测约 30s 量级（仅 RAG 精排单次就约 11s），p95 超过 60s 已是基线的两倍，
+            说明出现了长尾（重试、超大检索、工具串行等待）；持续 10 分钟仍不回落即告警。
+
+      - alert: AgentCostHourlyHigh
+        # 1 小时窗口的费用增量（Counter 累加的是每轮增量，不是会话累计快照）。
+        expr: sum(increase(agent_cost_yuan_total[1h])) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent 最近 1 小时费用超过 20 元"
+          description: >-
+            单题成本通常远低于 1 元，20 元/小时相当于连续跑 20 题以上的全价请求，
+            已超出日常评测/演示规模；持续 5 分钟说明不是一波流量尖峰，先查是否被刷或死循环重试。

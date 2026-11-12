@@ -23,6 +23,7 @@ if _ENV_FILE.exists():
 
 import asyncio
 import json
+import time
 
 from src.utils.logger import get_logger
 
@@ -38,7 +39,7 @@ from typing import TYPE_CHECKING, Any, cast
 import sentry_sdk
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
@@ -48,6 +49,7 @@ from redis import asyncio as aioredis
 from agent.adapters.api.hitl import frame_type
 from agent.adapters.api.hitl import router as hitl_router
 from agent.observability.langchain_handler import build_callbacks
+from agent.observability.metrics import observe_error, observe_request, render
 from agent.observability.tracer import get_tracer
 from agent.observability.turn import next_turn_index, turn_span
 from config import settings
@@ -707,6 +709,16 @@ async def health_check():
     return {"status": "ok", "message": "FastAPI + LangGraph 集成运行中"}
 
 
+# ---------- 指标暴露（B 卡）----------
+@app.get("/metrics")
+async def metrics_endpoint() -> Response:
+    """Prometheus 文本格式指标；开关关闭时按未启用处理（404，零副作用）。"""
+    if not settings.ENABLE_METRICS:
+        raise HTTPException(status_code=404, detail="指标未启用（ENABLE_METRICS=False）")
+    payload, content_type = render()
+    return Response(content=payload, media_type=content_type)
+
+
 # ===== 会话式 Agent 端点（阶段 A：workflow 降级为工具后的产品主干） =====
 
 # 会话式 Agent 图全局缓存（懒加载单例，复用全局 checkpointer 实现多轮衔接）
@@ -845,6 +857,9 @@ async def chat_conversation(request: Request, body: ConversationRequest):
     async def event_generator():
         from src.conversation_stream import ConversationStreamError, stream_conversation
 
+        started_at = time.monotonic()
+        # 埋点只改记录，不改流程：interrupted > failed > completed
+        outcome = "completed"
         try:
             await set_task_state(thread_id, "running")
             graph = await get_conversation_graph()
@@ -873,24 +888,33 @@ async def chat_conversation(request: Request, body: ConversationRequest):
                         interrupted = True
                     yield frame
                 if interrupted:
+                    outcome = "interrupted"
                     await set_task_state(thread_id, "interrupted", interrupt_time=datetime.now(UTC))
                 else:
                     await set_task_state(thread_id, "completed")
 
         except ConversationStreamError:
             # error 事件已由 stream_conversation 推送，这里只收尾状态机
+            outcome = "failed"
+            observe_error("fatal")
             logger.exception("会话式 Agent 执行错误")
             await set_task_state(thread_id, "failed")
         except GeneratorExit:
             # 客户端断连：把状态放回 idle，否则下一次请求会被 429 永久挡住
+            outcome = "failed"
+            observe_error("transient")
             logger.info("SSE 连接被客户端关闭 (GeneratorExit), thread_id=%s", thread_id)
             await set_task_state(thread_id, "idle")
             return
         except Exception as e:
+            outcome = "failed"
+            observe_error("fatal")
             logger.exception("会话式 Agent 执行错误")
             yield f"data: {json.dumps({'type': 'error', 'message': f'服务异常：{str(e)}'})}\n\n"
             await set_task_state(thread_id, "failed")
         finally:
+            # B 卡埋点：label 只用有限枚举（endpoint=conversation / outcome 四选一）
+            observe_request("conversation", outcome, time.monotonic() - started_at)
             if acquired:
                 await lock.release()
 

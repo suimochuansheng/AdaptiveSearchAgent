@@ -274,6 +274,11 @@ class Settings(BaseSettings):
     # 打开后所有工具输出（含 MCP / 子代理）与 load_skill 正文统一用 <untrusted> 包裹。
     ENABLE_TOOL_OUTPUT_GUARD: bool = False
 
+    # ── 可观测性指标（B 卡：指标 + 告警）──
+    # 默认开启：只加埋点与 GET /metrics，不改变 agent 行为与 SSE 帧；
+    # 关闭时埋点直接 return（零累加），/metrics 返回 404。
+    ENABLE_METRICS: bool = True
+
 
 # 全局单例，项目各处从此导入
 settings = Settings()

@@ -54,6 +54,7 @@ from langgraph.types import interrupt
 
 from agent.domain.budget import call_cost
 from agent.domain.tool_policy import PolicyContext, decide
+from agent.observability.metrics import observe_tool_decision
 from agent.observability.tool_outcome import (
     clear_tool_outcome,
     mark_outcome,
@@ -275,6 +276,8 @@ def wrap_tool(
         )
 
         decision = decide(spec, ctx, used)
+        # B 卡埋点：只记判定结果，不参与分支；tool 名来自注册表（有限集合）
+        observe_tool_decision(spec.name, decision.kind)
         if decision.kind == "require_approval":
             if _eval_auto_approve_enabled():
                 # 仅评测/演示用，生产禁用：不调 interrupt、不签凭据，直接执行。

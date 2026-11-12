@@ -37,6 +37,7 @@ from langgraph.types import Command
 from pydantic import BaseModel
 
 from agent.adapters.tools import executor
+from agent.observability.metrics import observe_approval
 from config import settings
 
 if TYPE_CHECKING:
@@ -171,10 +172,36 @@ async def _pending_interrupt(graph: Any, config: dict[str, Any]) -> bool:
 
 
 @router.post("/chat/conversation/{thread_id}/resume")
-async def resume_conversation(  # noqa: C901 - 状态码矩阵按契约逐条展开，拆开反而丢顺序
+async def resume_conversation(
     thread_id: str, body: ResumeRequest, request: Request
 ) -> StreamingResponse:
     """恢复一次被外层 HITL 挂起的会话（状态码严格按 `resume-http.md` §4）。
+
+    B 卡埋点：每个返回分支记一次审批结果（200 approve/reject、409 重放、
+    410 过期、404 冲突），不改状态码与执行流程。
+    """
+    try:
+        response = await _resume_conversation_impl(thread_id, body, request)
+    except HTTPException as exc:
+        observe_approval(body.decision, _resume_outcome(exc.status_code))
+        raise
+    observe_approval(body.decision, "approved" if body.decision == "approve" else "rejected")
+    return response
+
+
+def _resume_outcome(status_code: int) -> str:
+    """HTTP 状态码 -> `agent_approvals_total.outcome` 枚举（契约 §4）。"""
+    if status_code == 409:
+        return "replayed"
+    if status_code == 410:
+        return "expired"
+    return "conflict"
+
+
+async def _resume_conversation_impl(  # noqa: C901 - 状态码矩阵按契约逐条展开，拆开反而丢顺序
+    thread_id: str, body: ResumeRequest, request: Request
+) -> StreamingResponse:
+    """resume 的实际实现（状态机见模块 docstring）。
 
     处理顺序：`request_id` 幂等 -> 凭据存在性/归属/TTL -> 会话挂起校验 -> 会话锁 ->
     原子消费 -> `Command(resume=decision)` 续跑并继续吐 SSE。

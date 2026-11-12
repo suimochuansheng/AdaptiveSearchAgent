@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import inspect
 import logging
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage
 
+from agent.observability.metrics import observe_usage
 from agent.observability.tracer import SpanHandle, Tracer, bind_turn
 from config import settings
 
@@ -28,6 +30,36 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
+
+# 账本 `snapshot()` 给的是**会话累计**费用，而 Counter 只能加增量：直接上报累计值会
+# 让多轮会话重复计数。这里按 session 记住上次看到的累计值，取差值上报。
+# 只存在进程内、有上限（遵守 C1：session 不进指标标签），超出按最早会话淘汰。
+_COST_CURSOR: OrderedDict[str, float] = OrderedDict()
+_COST_CURSOR_MAX = 1024
+
+
+def _cost_delta(session_id: str, cumulative: float) -> float:
+    """把会话累计费用换算成本轮增量（累计回退时按 0 处理）。"""
+    previous = _COST_CURSOR.pop(session_id, 0.0)
+    delta = max(cumulative - previous, 0.0)
+    _COST_CURSOR[session_id] = max(cumulative, previous)
+    while len(_COST_CURSOR) > _COST_CURSOR_MAX:
+        _COST_CURSOR.popitem(last=False)
+    return delta
+
+
+def _observe_turn_usage(session_id: str, attrs: dict[str, Any]) -> None:
+    """上报本轮 token 与费用增量；字段缺失记 0，绝不因埋点打断收尾。"""
+    if not settings.ENABLE_METRICS:
+        return
+    try:
+        tokens_in = int(attrs.get("tokens_in") or 0)
+        tokens_out = int(attrs.get("tokens_out") or 0)
+        cumulative = float(attrs.get("cost") or 0.0)
+    except (TypeError, ValueError) as exc:
+        logger.debug("turn 用量字段无法解析，本轮按 0 记录：%s", exc)
+        tokens_in, tokens_out, cumulative = 0, 0, 0.0
+    observe_usage(tokens_in, tokens_out, _cost_delta(session_id, cumulative) if cumulative else 0.0)
 
 
 async def _ledger_cost(session_id: str) -> float:
@@ -88,6 +120,8 @@ async def turn_span(
         finally:
             attrs = await _aggregate(ctx.spans, root=root, error_kind=error_kind)
             tracer.end_span(root, status=status, attrs=attrs)
+            # B 卡埋点：turn 收尾统一上报本轮用量（开关关时薄封装直接返回）
+            _observe_turn_usage(root.session_id, attrs)
 
 
 async def next_turn_index(graph: Any, config: dict[str, Any]) -> int:
