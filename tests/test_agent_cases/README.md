@@ -61,8 +61,8 @@ poetry run pytest --collect-only -q | tail -2
 | `TDM-` | 预留（数据/模型类） | 同上 |
 | `TAR-` | 预留（归档/回归类） | 同上 |
 | `T95-` | 预留 | 同上 |
-| `INT-` | 跨卡集成用例（I1 架构基线、I2 治理闭环） | 已用（001~016） |
-| `UI-` | 前端/交互用例 | 同上 |
+| `INT-` | 跨卡集成用例（I1 架构基线、I2 治理闭环、I3 审批+MCP+前端） | 已用（001~030） |
+| `UI-` | 前端/交互用例（I3 人工手测） | 已用（001~005） |
 
 规则：**区间单调、不回收、不复用**；新增前缀必须先在表中登记，再往 CSV 追加行。
 
@@ -74,7 +74,7 @@ case_id,module,sub_feature,title,level,auto,priority,precondition,steps,expected
 
 | 列 | 允许值 / 格式 |
 |---|---|
-| `level` | `functional` / `E2E` |
+| `level` | `functional` / `E2E` / `UI`（`UI` 仅人工手测行） |
 | `auto` | `auto` / `manual` |
 | `priority` | `P0` / `P1` / `P2` |
 | `status` | `pass` / `fail` / `block` |

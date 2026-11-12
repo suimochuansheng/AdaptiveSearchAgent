@@ -468,22 +468,29 @@ def check_a6_approve_resume() -> str:
     )
 
 
-def check_a6b_reject_no_resume() -> str:
-    """拒绝 → 绝不发 resume，只提示已拒绝。"""
+def check_a6b_reject_resume() -> str:
+    """拒绝 -> 恰好一次 resume，decision=reject；只一张卡，有可读提示。"""
     _reset()
     app.cl.user_session = FakeUserSession(
         {app.SESSION_THREAD_ID: "tid-6b", app.SESSION_USER_NAME: "developer"}
     )
-    FakeAsyncClient.responses = [FakeResponse(_sse({"type": "interrupt", "data": INTERRUPT_DATA}))]
+    FakeAsyncClient.responses = [
+        FakeResponse(_sse({"type": "interrupt", "data": INTERRUPT_DATA})),
+        FakeResponse(_sse({"type": "final", "content": "已按拒绝处理"})),
+    ]
     app.httpx.AsyncClient = FakeAsyncClient  # type: ignore[assignment]
     FakeAskActionMessage.queue = [{"payload": {"value": app.APPROVAL_ACTION_REJECT}}]
     _run_drive()
 
     client = FakeAsyncClient.instances[-1]
-    assert len(client.calls) == 1, f"拒绝后仍发出额外请求: {client.calls!r}"
-    assert all("/resume" not in c["url"] for c in client.calls), "拒绝后调用了 resume"
+    resumes = [c for c in client.calls if "/resume" in c["url"]]
+    assert len(resumes) == 1, f"拒绝后 resume 次数不是 1: {client.calls!r}"
+    body = resumes[0]["json"]
+    assert body["decision"] == "reject", f"拒绝的 decision 不是 reject: {body!r}"
+    assert body["approval_id"] == "apr_demo_001", f"approval_id 错误: {body!r}"
+    assert len(_approval_cards()) == 1, "拒绝路径弹了多张卡"
     assert any("已拒绝执行" in m.content for m in SENT_MESSAGES), "拒绝后没有可读提示"
-    return "仅 1 次 /chat/conversation；无 /resume；提示'已拒绝执行'"
+    return "恰 1 次 /resume（decision=reject）；1 张卡；提示'已拒绝执行'"
 
 
 def check_a7_resume_disabled() -> str:
@@ -518,11 +525,14 @@ def check_a7_resume_disabled() -> str:
 
 
 def check_a8_timeout_auto_reject() -> str:
-    """把超时压到 2s：自动按 reject 处理、有提示、不调用 resume。"""
+    """把超时压到 2s：自动按 reject 处理，提示后恰好一次 resume，不卡在 interrupted。"""
     _reset()
     app.APPROVAL_TIMEOUT_SECONDS = 2
     app.cl.user_session = FakeUserSession({app.SESSION_THREAD_ID: "tid-8"})
-    FakeAsyncClient.responses = [FakeResponse(_sse({"type": "interrupt", "data": INTERRUPT_DATA}))]
+    FakeAsyncClient.responses = [
+        FakeResponse(_sse({"type": "interrupt", "data": INTERRUPT_DATA})),
+        FakeResponse(_sse({"type": "final", "content": "已按超时拒绝处理"})),
+    ]
     app.httpx.AsyncClient = FakeAsyncClient  # type: ignore[assignment]
     FakeAskActionMessage.queue = []  # 模拟无响应
     _run_drive()
@@ -530,11 +540,12 @@ def check_a8_timeout_auto_reject() -> str:
     ask = FakeAskActionMessage.last_instance
     assert ask is not None and ask.timeout == 2, f"超时未压到 2s: {ask and ask.timeout}"
     client = FakeAsyncClient.instances[-1]
-    assert len(client.calls) == 1, f"超时后仍调用了后端: {client.calls!r}"
-    assert all("/resume" not in c["url"] for c in client.calls), "超时后调用了 resume"
+    resumes = [c for c in client.calls if "/resume" in c["url"]]
+    assert len(resumes) == 1, f"超时后 resume 次数不是 1: {client.calls!r}"
+    assert resumes[0]["json"]["decision"] == "reject", "超时没有按 reject 恢复"
     blob = " ".join(m.content for m in SENT_MESSAGES)
     assert "审批超时" in blob and "自动拒绝" in blob, f"超时提示缺失: {blob!r}"
-    return "AskAction timeout=2；无 resume；提示含'审批超时'与'自动拒绝'"
+    return "AskAction timeout=2；1 次 resume(decision=reject)；提示含'审批超时'与'自动拒绝'"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -582,7 +593,13 @@ def _top_level_defs(src: str) -> dict[str, str]:
 # - on_chat_start / on_message：模式分流（G9）
 # - _build_resume_body：0a 三字段裁决（2026-11-11，OI-TDM-003）必须删 token，
 #   它属审批链路、不属旧 /chat/stream 流程；除它之外旧流程仍逐 AST 冻结。
-_ALLOWED_CHANGED_DEFS = {"on_chat_start", "on_message", "_build_resume_body"}
+_ALLOWED_CHANGED_DEFS = {
+    "on_chat_start",
+    "on_message",
+    "_build_resume_body",
+    # I3：拒绝/超时改为走 resume（审批链路，不属旧 /chat/stream 流程）
+    "_on_conversation_message",
+}
 
 
 def check_b2_old_flow_untouched() -> str:
@@ -760,7 +777,7 @@ def check_c3c_duplicate_reuse() -> str:
         "resume 的 decision 不是 approve"
     )
 
-    # 2) reject：重复帧不得第二次提示，也不得调用 resume
+    # 2) reject：提示只一次；resume 恰好一次（decision=reject），不算重复放行
     _reset()
     app.cl.user_session = FakeUserSession({app.SESSION_THREAD_ID: "tid-c3c-r"})
     FakeAsyncClient.responses = [
@@ -773,9 +790,11 @@ def check_c3c_duplicate_reuse() -> str:
     reject_msgs = [m for m in SENT_MESSAGES if "已拒绝执行" in m.content]
     assert len(_approval_cards()) == 1, "reject 路径重复弹卡"
     assert len(reject_msgs) == 1, f"reject 提示重复了 {len(reject_msgs)} 次"
-    assert _resume_calls() == [], "reject 路径调用了 resume"
+    reject_resumes = _resume_calls()
+    assert len(reject_resumes) == 1, f"reject 路径 resume 次数不是 1: {reject_resumes!r}"
+    assert reject_resumes[0]["json"]["decision"] == "reject", "reject 的 decision 不是 reject"
 
-    # 3) 超时：同样只提示一次、不调用 resume
+    # 3) 超时：提示只一次；resume 恰好一次（decision=reject）
     _reset()
     app.APPROVAL_TIMEOUT_SECONDS = 2
     app.cl.user_session = FakeUserSession({app.SESSION_THREAD_ID: "tid-c3c-t"})
@@ -789,8 +808,13 @@ def check_c3c_duplicate_reuse() -> str:
     timeout_msgs = [m for m in SENT_MESSAGES if "审批超时" in m.content]
     assert len(_approval_cards()) == 1, "超时路径重复弹卡"
     assert len(timeout_msgs) == 1, f"超时提示重复了 {len(timeout_msgs)} 次"
-    assert _resume_calls() == [], "超时路径调用了 resume"
-    return "同 approval_id：1 卡 + 1 次 resume；重复帧被忽略；reject/超时各 1 次提示、0 resume"
+    timeout_resumes = _resume_calls()
+    assert len(timeout_resumes) == 1, f"超时路径 resume 次数不是 1: {timeout_resumes!r}"
+    assert timeout_resumes[0]["json"]["decision"] == "reject", "超时的 decision 不是 reject"
+    return (
+        "同 approval_id：1 卡 + 1 次 resume；重复帧被忽略；"
+        "reject/超时各 1 次提示、各 1 次 resume(reject)"
+    )
 
 
 CHECKS: list[tuple[str, str, Any]] = [
@@ -804,9 +828,9 @@ CHECKS: list[tuple[str, str, Any]] = [
     ("TDM-A4", "未知 type 忽略", check_a4_unknown_type),
     ("TDM-A5", "审批卡片五要素 + 两按钮", check_a5_approval_card),
     ("TDM-A6", "同意 -> resume body", check_a6_approve_resume),
-    ("TDM-A6b", "拒绝 -> 不发 resume", check_a6b_reject_no_resume),
+    ("TDM-A6b", "拒绝 -> 发 resume(reject)", check_a6b_reject_resume),
     ("TDM-A7", "resume 404/405 未启用不崩", check_a7_resume_disabled),
-    ("TDM-A8", "2s 超时自动拒绝", check_a8_timeout_auto_reject),
+    ("TDM-A8", "2s 超时 -> resume(reject)", check_a8_timeout_auto_reject),
     ("TDM-B1a", "src/api_main.py 零改动", check_b1a_src_clean),
     ("TDM-B1b", "config.py/pyproject.toml 零改动", check_b1b_forbidden_clean),
     ("TDM-B2", "旧流程纯新增", check_b2_old_flow_untouched),
@@ -814,7 +838,7 @@ CHECKS: list[tuple[str, str, Any]] = [
     ("TDM-C2", "同 thread_id 连轮", check_c2_same_thread_two_rounds),
     ("TDM-C3", "同 approval_id 卡片去重", check_c3_duplicate_card),
     ("TDM-C3b", "不同 approval_id 各一张卡", check_c3b_distinct_approvals),
-    ("TDM-C3c", "重复帧忽略 / reject 超时不重复", check_c3c_duplicate_reuse),
+    ("TDM-C3c", "重复帧忽略 / reject 超时各 1 次 resume", check_c3c_duplicate_reuse),
 ]
 
 

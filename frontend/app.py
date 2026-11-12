@@ -704,7 +704,7 @@ def _register_approval(interrupt_data: dict, shown: set[str]) -> bool:
     return True
 
 
-async def _on_conversation_message(message: cl.Message) -> None:
+async def _on_conversation_message(message: cl.Message) -> None:  # noqa: C901 - 审批状态机
     """conversation 模式的消息入口：流式渲染 → 审批卡片 → 恢复（若后端支持）。"""
     thread_id = cl.user_session.get(SESSION_THREAD_ID)
     if not thread_id:
@@ -753,16 +753,36 @@ async def _on_conversation_message(message: cl.Message) -> None:
                         break
                 elif decision == APPROVAL_ACTION_REJECT:
                     await cl.Message(content="🙅 已拒绝执行，本次调用未被发起。").send()
-                    break
+                    # 拒绝也必须走 resume：把 decision 送回后端消费凭据并让图按
+                    # reject 分支继续；否则会话停在 interrupted，下一条消息 409。
+                    state, interrupt_data, output_msg, step = await _resume_conversation(
+                        thread_id=thread_id,
+                        interrupt_data=interrupt_data,
+                        decision=APPROVAL_ACTION_REJECT,
+                        client=client,
+                        output_msg=output_msg,
+                        step=step,
+                    )
+                    if state != "resumed":
+                        break
                 else:
-                    # 超时：按 reject 处理，不调用 resume
+                    # 超时：按 reject 处理，同样走 resume 消费凭据，避免卡在 interrupted
                     await cl.Message(
                         content=(
                             f"⏰ 审批超时（{APPROVAL_TIMEOUT_SECONDS} 秒），"
                             "已自动拒绝，本次调用未被发起。"
                         )
                     ).send()
-                    break
+                    state, interrupt_data, output_msg, step = await _resume_conversation(
+                        thread_id=thread_id,
+                        interrupt_data=interrupt_data,
+                        decision=APPROVAL_ACTION_REJECT,
+                        client=client,
+                        output_msg=output_msg,
+                        step=step,
+                    )
+                    if state != "resumed":
+                        break
 
         except httpx.HTTPStatusError as exc:
             await _write_error(f"后端错误 (HTTP {exc.response.status_code})", output_msg)
