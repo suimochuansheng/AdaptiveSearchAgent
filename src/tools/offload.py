@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent.adapters.tools import untrusted
 from config import settings
 from src.context_manager import compress_tool_output, estimate_tokens
 from src.utils.logger import get_logger
@@ -88,11 +89,15 @@ def shrink_tool_message(message: ToolMessage, *, thread_id: str) -> ToolMessage:
         thread_id: 会话 id（卸载目录用）。
 
     Returns:
-        可能被替换 content 的新消息；未超预算时原样返回。
+        可能被替换 content 的新消息；未超预算且防护开关关闭时原样返回。
     """
     text = str(message.content)
     tokens = estimate_tokens(text)
     if tokens <= settings.tool_output_token_budget:
+        # 开关打开时短输出同样要包裹；关时保持原来的“原对象返回”
+        if settings.ENABLE_TOOL_OUTPUT_GUARD:
+            body = untrusted.wrap(text, message.name or "tool")
+            return message.model_copy(update={"content": body})
         return message
 
     body = compress_tool_output(text, settings.tool_output_token_budget)
@@ -103,6 +108,10 @@ def shrink_tool_message(message: ToolMessage, *, thread_id: str) -> ToolMessage:
         except OSError:
             # 落盘失败不能让会话挂掉：退化成"只压缩"，并留下日志
             logger.warning("工具输出落盘失败，退化为纯压缩", exc_info=True)
+
+    # 工具输出一律视为不可信数据：在压缩 / 卸载之后包裹，指针文本也在包裹内
+    if settings.ENABLE_TOOL_OUTPUT_GUARD:
+        body = untrusted.wrap(body, message.name or "tool")
 
     return message.model_copy(update={"content": body})
 

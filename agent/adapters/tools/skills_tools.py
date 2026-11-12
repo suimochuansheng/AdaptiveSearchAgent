@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent.adapters.skills import loader
+from agent.adapters.tools import untrusted
 from agent.domain.tool import CostModel, ToolSpec
 from config import settings
 
@@ -37,10 +38,16 @@ def list_skills() -> str:
 def load_skill(name: str) -> str:
     """读取指定技能的正文（不含 frontmatter）；未知或不合法名字返回可读错误。
 
+    技能包可能由别人编写，正文属于不可信数据：`ENABLE_TOOL_OUTPUT_GUARD` 打开时
+    同样用 `<untrusted>` 包裹（与 `shrink_tool_message` 的收口一致，wrap 幂等）。
+
     Args:
         name: 技能名，必须来自 list_skills 的返回结果（只允许 [a-z0-9-]）。
     """
-    return loader.load(name)
+    body = loader.load(name)
+    if settings.ENABLE_TOOL_OUTPUT_GUARD:
+        return untrusted.wrap(body, LOAD_SKILL_TOOL_NAME)
+    return body
 
 
 def register_skills_tools() -> bool:

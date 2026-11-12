@@ -269,6 +269,11 @@ class Settings(BaseSettings):
     # 单个技能正文的 token 上限；超出截断并加标记
     SKILL_MAX_BODY_TOKENS: int = 2000
 
+    # ── 新功能开关：工具输出注入防护（T6-5）──
+    # 默认关闭；关时 shrink_tool_message 逐字节不变、系统提示不追加。
+    # 打开后所有工具输出（含 MCP / 子代理）与 load_skill 正文统一用 <untrusted> 包裹。
+    ENABLE_TOOL_OUTPUT_GUARD: bool = False
+
 
 # 全局单例，项目各处从此导入
 settings = Settings()
