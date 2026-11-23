@@ -94,6 +94,37 @@ def _validity_text(meta: Mapping[str, Any]) -> str:
     return "未记录（历史 run）"
 
 
+def _partial_text(meta: Mapping[str, Any]) -> str:
+    partial = meta.get("partial")
+    n_cases = meta.get("n_cases")
+    dataset_size = meta.get("dataset_size")
+    if partial is True:
+        return f"非全量（n_cases={n_cases} / dataset_size={dataset_size}）"
+    if partial is False:
+        return "全量"
+    if isinstance(n_cases, int) and isinstance(dataset_size, int) and n_cases < dataset_size:
+        return f"非全量（n_cases={n_cases} / dataset_size={dataset_size}，历史未标注）"
+    return "未记录（历史 run）"
+
+
+def _publishable_text(meta: Mapping[str, Any]) -> str:
+    publishable = meta.get("publishable")
+    if publishable is True:
+        return "是"
+    if publishable is False:
+        return "否"
+    return "未记录（历史 run）"
+
+
+def _is_partial(meta: Mapping[str, Any]) -> bool:
+    partial = meta.get("partial")
+    if isinstance(partial, bool):
+        return partial
+    n_cases = meta.get("n_cases")
+    dataset_size = meta.get("dataset_size")
+    return isinstance(n_cases, int) and isinstance(dataset_size, int) and n_cases < dataset_size
+
+
 def _meta_section(run: Run, report_path: Path) -> list[str]:
     meta = run.meta
     flags = meta.get("flags") or {}
@@ -112,6 +143,8 @@ def _meta_section(run: Run, report_path: Path) -> list[str]:
         f"| 样本数 | {len(run.per_case)}（有效 {scored}） |",
         f"| 代码版本 | `{_cell(meta.get('git_commit'))}` |",
         f"| 有效性 | {_validity_text(meta)} |",
+        f"| 全量性 | {_partial_text(meta)} |",
+        f"| 可发布 | {_publishable_text(meta)} |",
         f"| 环境探活 | {_cell(_environment_text(meta))} |",
         f"| 数据集 | {_cell(meta.get('dataset'))} |",
         f"| 数据集 sha256 | `{_cell(str(meta.get('dataset_sha256') or '')[:16])}…` |",
@@ -151,6 +184,12 @@ def _diff_section(result: GateResult | None) -> list[str]:
         f"- 基线：`{result.baseline_run_id}`（mean={result.baseline_mean:.4f}）",
         f"- 候选：`{result.candidate_run_id}`（mean={result.candidate_mean:.4f}）",
         f"- 共同有效题：{result.common_cases}",
+    ]
+    if result.missing_in_candidate:
+        lines.append(f"- 候选缺题：{', '.join(result.missing_in_candidate)}")
+    if result.missing_in_baseline:
+        lines.append(f"- 基线缺题：{', '.join(result.missing_in_baseline)}")
+    lines += [
         "",
         "| case | base | cand | diff | 归因 |",
         "|---|---|---|---|---|",
@@ -223,11 +262,29 @@ def write_markdown(run_id: str, compare_result: GateResult | None) -> Path:
         f"# 评测报告 — {run_id}",
         "",
     ]
+    warnings: list[str] = []
     if run.meta.get("valid_for_quality") is False:
-        lines += [
-            "> ⚠️ 本次为链路验证 run，环境未就绪，分数不可用于质量结论",
-            "",
-        ]
+        warnings.append("本次为链路验证 run，环境未就绪，分数不可用于质量结论")
+    if _is_partial(run.meta):
+        warnings.append(
+            f"非全量 run（n_cases={run.meta.get('n_cases')} / "
+            f"dataset_size={run.meta.get('dataset_size')}），结论不可用于发布或写简历"
+        )
+    if compare_result is not None:
+        if compare_result.quality_warning:
+            warnings.append(compare_result.quality_warning)
+        if compare_result.code_version_changed:
+            warnings.append(
+                f"两次 run 代码版本不同（{compare_result.baseline_git} vs "
+                f"{compare_result.candidate_git}），分数差异不能归因于配置开关"
+            )
+        if compare_result.partial_compare:
+            warnings.append(
+                f"仅比较共同题（compared_cases={compare_result.compared_cases} / "
+                f"skipped={compare_result.skipped}），结论不可跨版本比较"
+            )
+    for warning in warnings:
+        lines += [f"> ⚠️ {warning}", ""]
     lines += [
         f"> 配置 {run.meta.get('config_id')} / 数据集 {run.meta.get('dataset')}；"
         "本报告由 `evals/report.py` 自动生成，结论句来自 `evals/gate.py`。",

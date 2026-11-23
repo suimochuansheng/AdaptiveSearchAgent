@@ -73,10 +73,14 @@ def _make_run(
     *,
     drop_tools: bool = False,
     valid_for_quality: bool = True,
+    case_ids: tuple[str, ...] = _CASE_IDS,
+    git_commit: str = "fixture",
+    partial: bool = False,
+    dataset_size: int | None = None,
 ) -> Run:
     per_case = []
     for index, score in enumerate(scores):
-        case_id = _CASE_IDS[index]
+        case_id = case_ids[index]
         if score is None:
             per_case.append(
                 _case(
@@ -98,7 +102,8 @@ def _make_run(
         "model": "fixture-model",
         "judge_model": "fixture-judge",
         "n_cases": len(per_case),
-        "git_commit": "fixture",
+        "dataset_size": dataset_size if dataset_size is not None else len(per_case),
+        "git_commit": git_commit,
         "flags": {"ENABLE_TOOL_POLICY": "0"},
         "schema_sha256": "0" * 64,
         "dataset": "fixture",
@@ -112,6 +117,8 @@ def _make_run(
             "checked_at": "fixture",
         },
         "valid_for_quality": valid_for_quality,
+        "partial": partial,
+        "publishable": not partial,
     }
     store.save_run(run_id, meta, per_case)
     return store.load_run(run_id)
@@ -122,19 +129,21 @@ def _assert(condition: bool, message: str) -> None:
         raise SmokeFailure(message)
 
 
-def _gate_exit(baseline: Run, candidate: Run) -> tuple[int, str]:
+def _gate_exit(baseline: Run, candidate: Run, *extra: str) -> tuple[int, str]:
     """走真实 CLI 入口，断言退出码；stdout 一并返回供错误信息使用。"""
     out = io.StringIO()
-    with contextlib.redirect_stdout(out):
+    err = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         code = gate.main(
             [
                 "--baseline",
                 str(store.RESULTS_DIR / baseline.run_id),
                 "--candidate",
                 str(store.RESULTS_DIR / candidate.run_id),
+                *extra,
             ]
         )
-    return code, out.getvalue()
+    return code, out.getvalue() + err.getvalue()
 
 
 def check_degraded(base: Run) -> str:
@@ -200,7 +209,7 @@ def check_fail_degraded(base: Run) -> str:
 
 def check_invalid_report(base: Run) -> str:
     candidate = _make_run(f"{_STAMP}-fixture-invalid", [9, 8, 9], valid_for_quality=False)
-    result = gate.compare(base, candidate)
+    result = gate.compare(base, candidate, allow_invalid_candidate=True)
     text = report.write_markdown(candidate.run_id, result).read_text(encoding="utf-8")
     _assert(LINK_ONLY_WARNING in text, "valid_for_quality=false 的报告缺顶部警告")
     _assert("不可用于质量结论" in text, "报告缺不可用质量结论标注")
@@ -221,7 +230,7 @@ def check_single_case(base: Run) -> str:
     single = Run(
         run_id="fixture-single",
         meta={"recorded_variance": gate.DEFAULT_RECORDED_VARIANCE},
-        per_case=(_case("q001", 9),),
+        per_case=tuple(_case(case_id, 9 if case_id == "q001" else None) for case_id in _CASE_IDS),
     )
     try:
         gate.compare(base, single)
@@ -286,6 +295,107 @@ def check_probe_failure() -> str:
     return "RAG 不可达 -> 退出码 2，提示 环境未就绪：rag"
 
 
+def check_invalid_baseline(base: Run) -> str:
+    invalid = _make_run(f"{_STAMP}-fixture-invalid-base", [9, 8, 9], valid_for_quality=False)
+    try:
+        gate.compare(invalid, base)
+    except GateInputError as exc:
+        text = str(exc)
+        _assert("valid_for_quality" in text, f"错误应说明链路验证：{text}")
+        _assert("allow-invalid-baseline" in text, f"错误应给出放行开关：{text}")
+    else:
+        raise SmokeFailure("无效基线默认应拒绝，实际通过了比较")
+
+    code, _ = _gate_exit(invalid, base)
+    _assert(code == 2, f"无效基线默认退出码应为 2，实际 {code}")
+    result = gate.compare(invalid, base, allow_invalid_baseline=True)
+    warning = result.quality_warning or ""
+    _assert(bool(warning), "放行后 quality_warning 不能为空")
+    _assert("链路验证" in warning, "quality_warning 应说明链路验证")
+    code2, _ = _gate_exit(invalid, base, "--allow-invalid-baseline")
+    _assert(code2 == 0, f"加 --allow-invalid-baseline 后退出码应为 0，实际 {code2}")
+    return "无效基线默认 exit 2；放行后 quality_warning 非空、exit 0"
+
+
+def check_partial_set(base: Run) -> str:
+    partial = _make_run(
+        f"{_STAMP}-fixture-partial-set",
+        [9, 8],
+        case_ids=("q001", "q002"),
+    )
+    try:
+        gate.compare(base, partial)
+    except GateInputError as exc:
+        text = str(exc)
+        _assert("缺 1 题" in text, f"错误应写缺题数量：{text}")
+        _assert("q003" in text, f"错误应列出缺失题号：{text}")
+        _assert("allow-partial" in text, f"错误应给出放行开关：{text}")
+    else:
+        raise SmokeFailure("题集不一致默认应拒绝，实际通过了比较")
+
+    code, _ = _gate_exit(base, partial)
+    _assert(code == 2, f"题集不一致默认退出码应为 2，实际 {code}")
+    result = gate.compare(base, partial, allow_partial=True)
+    _assert(result.compared_cases == 2, f"compared_cases 应为 2，实际 {result.compared_cases}")
+    _assert(result.skipped == 1, f"skipped 应为 1，实际 {result.skipped}")
+    _assert(result.partial_compare is True, "partial_compare 应为 True")
+    _assert("仅比较共同题" in result.reason, f"reason 应写明仅比较共同题：{result.reason}")
+    code2, _ = _gate_exit(base, partial, "--allow-partial")
+    _assert(code2 == 0, f"加 --allow-partial 后退出码应为 0，实际 {code2}")
+    return "题集不一致默认 exit 2；放行后 compared_cases=2 / skipped=1"
+
+
+def check_zero_delta(base: Run) -> str:
+    same = _make_run(f"{_STAMP}-fixture-zero", [9, 8, 9])
+    result = gate.compare(base, same)
+    _assert(result.status == "PASS", f"零差值应为 PASS，实际 {result.status}")
+    _assert(result.delta == 0, f"零差值 delta 应为 0，实际 {result.delta}")
+    _assert("无差异" in result.reason, f"零差值 reason 应写无差异：{result.reason}")
+    _assert("同口径无漂移" not in result.reason, "零差值不应写同口径无漂移")
+    return f"PASS，reason={result.reason!r}"
+
+
+def check_partial_run(base: Run) -> str:
+    import evals.run as run_module
+
+    partial = _make_run(
+        f"{_STAMP}-fixture-partial-run",
+        [9, 8, 9],
+        partial=True,
+        dataset_size=20,
+    )
+    _assert(partial.meta.get("partial") is True, "非全量 run 的 meta.partial 应为 True")
+    _assert(partial.meta.get("publishable") is False, "非全量 run 的 meta.publishable 应为 False")
+    result = gate.compare(base, partial)
+    text = report.write_markdown(partial.run_id, result).read_text(encoding="utf-8")
+    _assert("非全量 run" in text, "report 缺非全量提示")
+    _assert("n_cases=3 / dataset_size=20" in text, "report 缺 n_cases/dataset_size")
+    _assert("不可用于发布" in text, "report 缺不可用于发布提示")
+    _assert(run_module._partial_flags(1, 20) == (True, False), "_partial_flags(1,20) 错误")
+    _assert(run_module._partial_flags(20, 20) == (False, True), "_partial_flags(20,20) 错误")
+    return "meta.partial=true / publishable=false；report 有非全量警告"
+
+
+def check_code_version(base: Run) -> str:
+    drift = _make_run(f"{_STAMP}-fixture-git-drift", [9, 8, 9], git_commit="bbbbbbb")
+    result = gate.compare(base, drift)
+    _assert(result.code_version_changed is True, "两 run git 不同应置 code_version_changed=True")
+    text = report.write_markdown(drift.run_id, result).read_text(encoding="utf-8")
+    _assert("代码版本不同" in text, "report 缺代码版本提示")
+    _assert("fixture" in text and "bbbbbbb" in text, "report 未写出两侧 git 短哈希")
+    _assert("不能归因于配置开关" in text, "report 缺不能归因于配置开关提示")
+
+    drift_bad = _make_run(
+        f"{_STAMP}-fixture-git-drift-bad",
+        [8.5, 7.5, 8.5],
+        git_commit="bbbbbbb",
+    )
+    bad = gate.compare(base, drift_bad)
+    _assert(bad.status == "FAIL_DEGRADED", f"版本漂移 + 退化应为 FAIL_DEGRADED，实际 {bad.status}")
+    _assert("含代码版本差异" in bad.reason, f"reason 应写含版本差异：{bad.reason}")
+    return "code_version_changed=True；report 提示版本不同，退化原因改为无法归因"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="评测门禁离线冒烟（不调模型）")
     parser.add_argument(
@@ -314,6 +424,11 @@ def main(argv: list[str] | None = None) -> int:
         ("提升 +0.5（超方差）-> WARN_IMPROVED，退出码 0", lambda: check_warn_improved(base)),
         ("退化 -0.5（超方差）-> FAIL_DEGRADED，退出码 1", lambda: check_fail_degraded(base)),
         ("链路验证 run 报告顶部警告", lambda: check_invalid_report(base)),
+        ("无效基线 -> 默认拒绝，放行后 quality_warning", lambda: check_invalid_baseline(base)),
+        ("题集不一致 -> 默认拒绝，放行后 compared_cases", lambda: check_partial_set(base)),
+        ("零差值 -> reason 写无差异", lambda: check_zero_delta(base)),
+        ("非全量 run -> meta.partial/publishable + report 警告", lambda: check_partial_run(base)),
+        ("代码版本不同 -> code_version_changed + report 提示", lambda: check_code_version(base)),
         ("探活失败 -> 退出码 2", lambda: check_probe_failure()),
         ("边界：方差为 0 -> 可读错误", lambda: check_zero_variance(base, base)),
         ("边界：只有 1 题 -> 可读错误", lambda: check_single_case(base)),

@@ -31,6 +31,14 @@ CI 没有模型凭据，**不跑 `evals/run.py`**；`.github/workflows/eval-gate
     裁判漂移 / 答案变短），CLI 退出码 0 但报告保留 WARN；
   - `FAIL_DEGRADED`：退化超出记录噪声，CLI 退出码 1；
 - CLI：`PASS` / `WARN_IMPROVED` -> 0，`FAIL_DEGRADED` -> 1，输入不合法 -> 2；
+- **有效性守卫**：任一侧 `valid_for_quality=false` 默认拒绝（退出码 2）；
+  确需对比加 `--allow-invalid-baseline` / `--allow-invalid-candidate`，结果带 `quality_warning`；
+- **题集守卫**：两侧题号不一致默认拒绝，错误列出“候选缺 N 题：q003”；确需按共同题比较加
+  `--allow-partial`，结果带 `compared_cases` / `skipped`，报告写“结论不可跨版本比较”；
+- **零差值**：`|delta| < 1e-9` 时 reason 写“无差异（两均值完全相同）”；
+- **代码版本**：两 run 的 `git_commit` 不同时 `code_version_changed=true`；退出码不变，
+  但报告顶部提示“分数差异不能归因于配置开关”，且 |delta| 超方差时 reason 改为
+  “含代码版本差异，无法归因，需同版本复跑”；
 - 少于 2 道共同有效题、方差 <= 0、per_case 缺字段都直接给可读错误（退出码 2），不猜。
 
 ## 3. 怎么跑
@@ -45,6 +53,11 @@ python -m evals.run --configs A --limit 1
 # 1b) 环境未就绪时只验链路（meta.valid_for_quality=false，报告顶部带警告）
 python -m evals.run --configs A --limit 1 --allow-degraded
 
+# 1c) --limit 小于题数 => meta.partial=true / publishable=false，报告提示“非全量”
+#     对比时默认过滤 valid_for_quality=false 的历史 run；要纳入加 --allow-invalid
+python -m evals.run --configs A --limit 1
+python -m evals.run --configs A,B --compare last --allow-invalid
+
 # 2) 配置矩阵：A 全关 / B 治理 / C +审批
 python -m evals.run --configs A,B,C --set golden20
 
@@ -54,6 +67,9 @@ python -m evals.run --configs A,B --compare last
 # 4) 只看门禁（退出码 0=PASS/WARN / 1=FAIL_DEGRADED / 2=输入不合法）
 python -m evals.gate --baseline <run_id|path> --candidate <run_id|path>
 python -m evals.gate --compare last
+# 明确放行无效 run / 题集不一致（结果会带 quality_warning / compared_cases / skipped）
+python -m evals.gate --baseline <run> --candidate <run> \
+  --allow-invalid-baseline --allow-invalid-candidate --allow-partial
 
 # 5) 离线冒烟（不调模型，CI 同款）
 python scripts/smoke_eval_gate.py
@@ -98,5 +114,9 @@ python -m evals.backfill \
 - `latency_ms` / `tokens` 来自现有 SSE；`tokens` 在会话端点没有 kpi 帧时为 `null`，
   报告不据此判定；
 - 门禁只比较**共同有效题**：某题候选失败（无分数）不计入均值，但会在失败清单里归因；
+- **非全量 run**（`--limit N < dataset_size`）分数不可用于发布或写简历：
+  meta 标 `partial=true / publishable=false`，报告顶部有醒目提示；
+- **代码版本不同**的两次 run 不做配置归因：报告顶部提示，`|delta|` 超方差时 reason
+  明确写“无法归因，需同版本复跑”；
 - `valid_for_quality=false` 的 run（如 2026-11-23 的 3 个链路验证 run）分数不可用于质量结论；
   历史 report.md 是补丁前生成的，可能没有顶部警告，以 meta 标注为准。

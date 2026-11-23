@@ -6,7 +6,9 @@
 - 每个 config 一个独立后端进程，启动时把 `evals/configs.py` 的 env 直接注入，
   跑完即停，避免开关串味；
 - 开跑前探活 RAG / 模型 / PG / Redis；失败默认拒绝开跑（退出码 2），
-  显式 `--allow-degraded` 才继续，并在 meta 标 `valid_for_quality=false`。
+  显式 `--allow-degraded` 才继续，并在 meta 标 `valid_for_quality=false`；
+- `--limit N < dataset_size` 时 meta 标 `partial=true / publishable=false`，
+  报告顶部提示“非全量，不可用于发布”。
 
 用法：
 
@@ -14,6 +16,7 @@
     python -m evals.run --configs A,B,C --set golden20
     python -m evals.run --configs A,B --compare last
     python -m evals.run --configs A --limit 1 --allow-degraded
+    python -m evals.run --configs A,B --compare last --allow-invalid
 
 产物：`evals/results/<run_id>/{meta.json,per_case.json,report.md}`。
 """
@@ -401,12 +404,21 @@ async def _evaluate(
     return results
 
 
-def _previous_run(exclude_run_id: str, dataset_sha256: str) -> gate.Run | None:
+def _partial_flags(limit: int, dataset_size: int) -> tuple[bool, bool]:
+    """返回 (partial, publishable)：--limit 小于数据集题数即非全量。"""
+    partial = bool(limit > 0 and limit < dataset_size)
+    return partial, not partial
+
+
+def _previous_run(
+    exclude_run_id: str, dataset_sha256: str, *, include_invalid: bool = False
+) -> gate.Run | None:
     runs = [
         run
         for run in store.list_runs()
         if run.run_id != exclude_run_id
         and (not dataset_sha256 or run.meta.get("dataset_sha256") == dataset_sha256)
+        and (include_invalid or run.meta.get("valid_for_quality") is not False)
     ]
     return runs[-1] if runs else None
 
@@ -420,6 +432,12 @@ def _print_diff(result: gate.GateResult) -> None:
         cand = "—" if item.candidate_score is None else f"{item.candidate_score:.2f}"
         delta = "—" if item.delta is None else f"{item.delta:+.2f}"
         print(f"{item.case_id:<9} {base:<5} {cand:<5} {delta:<7} {item.attribution or '—'}")
+    if result.quality_warning:
+        print(f"质量警告：{result.quality_warning}")
+    if result.partial_compare:
+        print(f"题集：仅比较共同题 compared_cases={result.compared_cases} skipped={result.skipped}")
+    if result.code_version_changed:
+        print(f"代码版本不同：{result.baseline_git} vs {result.candidate_git}")
     print(result.reason)
 
 
@@ -457,6 +475,7 @@ def _run_one(
     finally:
         _stop_backend(proc, log_file, args.base_url)
 
+    partial, publishable = _partial_flags(args.limit, dataset_size)
     meta: dict[str, Any] = {
         "schema_version": 1,
         "run_id": run_id,
@@ -474,6 +493,8 @@ def _run_one(
         "dataset": str(dataset),
         "dataset_sha256": dataset_sha256,
         "dataset_size": dataset_size,
+        "partial": partial,
+        "publishable": publishable,
         "base_url": args.base_url,
         "recorded_variance": (
             args.variance if args.variance is not None else gate.DEFAULT_RECORDED_VARIANCE
@@ -488,12 +509,18 @@ def _run_one(
 
     compare_result: gate.GateResult | None = None
     if args.compare == "last":
-        previous = _previous_run(run_id, dataset_sha256)
+        previous = _previous_run(run_id, dataset_sha256, include_invalid=args.allow_invalid)
         if previous is None:
             print(f"[{config.id}] 没有同数据集的历史 run，本次不生成 diff", flush=True)
         else:
             try:
-                compare_result = gate.compare(previous, store.load_run(run_id), args.variance)
+                compare_result = gate.compare(
+                    previous,
+                    store.load_run(run_id),
+                    args.variance,
+                    allow_invalid_baseline=args.allow_invalid,
+                    allow_invalid_candidate=args.allow_invalid,
+                )
             except gate.GateInputError as exc:
                 print(f"[{config.id}] 未判定：{exc}", flush=True)
 
@@ -520,6 +547,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=["last"],
         default=None,
         help="跑完后与同数据集的上一次 run 比较并写进报告",
+    )
+    parser.add_argument(
+        "--allow-invalid",
+        action="store_true",
+        help="对比时纳入并允许 valid_for_quality=false 的 run（默认过滤）",
     )
     parser.add_argument(
         "--use-running-backend",

@@ -44,6 +44,8 @@ META_REQUIRED = (
     "schema_sha256",
     "environment",
     "valid_for_quality",
+    "partial",
+    "publishable",
 )
 
 #: environment 探活字段（patch 2）。
@@ -100,6 +102,25 @@ def _write_json(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
+def _validate_meta_environment(meta: Mapping[str, Any]) -> None:
+    environment = meta["environment"]
+    if not isinstance(environment, Mapping):
+        raise StoreError(f"meta.environment 必须是对象，实际 {type(environment).__name__}")
+    missing = [key for key in ENVIRONMENT_REQUIRED if key not in environment]
+    if missing:
+        raise StoreError(f"meta.environment 缺字段：{', '.join(missing)}")
+
+
+def _validate_meta_publication(meta: Mapping[str, Any]) -> None:
+    if not isinstance(meta["valid_for_quality"], bool):
+        raise StoreError(f"meta.valid_for_quality 必须是 bool，实际 {meta['valid_for_quality']!r}")
+    for key in ("partial", "publishable"):
+        if not isinstance(meta[key], bool):
+            raise StoreError(f"meta.{key} 必须是 bool，实际 {meta[key]!r}")
+    if meta["partial"] and meta["publishable"]:
+        raise StoreError("meta.partial=true 时 publishable 不能为 true")
+
+
 def _validate_meta(meta: Mapping[str, Any]) -> None:
     missing = [key for key in META_REQUIRED if key not in meta]
     if missing:
@@ -108,14 +129,8 @@ def _validate_meta(meta: Mapping[str, Any]) -> None:
         raise StoreError(f"meta.n_cases 必须是非负整数，实际 {meta['n_cases']!r}")
     if not isinstance(meta["flags"], Mapping):
         raise StoreError(f"meta.flags 必须是对象，实际 {type(meta['flags']).__name__}")
-    environment = meta["environment"]
-    if not isinstance(environment, Mapping):
-        raise StoreError(f"meta.environment 必须是对象，实际 {type(environment).__name__}")
-    missing_env = [key for key in ENVIRONMENT_REQUIRED if key not in environment]
-    if missing_env:
-        raise StoreError(f"meta.environment 缺字段：{', '.join(missing_env)}")
-    if not isinstance(meta["valid_for_quality"], bool):
-        raise StoreError(f"meta.valid_for_quality 必须是 bool，实际 {meta['valid_for_quality']!r}")
+    _validate_meta_environment(meta)
+    _validate_meta_publication(meta)
     for key in ("run_id", "created_at", "config_id", "model", "git_commit", "schema_sha256"):
         if not str(meta[key] or "").strip():
             raise StoreError(f"meta.{key} 不能为空")

@@ -19,6 +19,10 @@
     python -m evals.gate --baseline <run_id|path> --candidate <run_id|path> [--variance 0.0408]
     python -m evals.gate --compare last
     python -m evals.gate --compare <run_id|path>   # 指定基线，候选取最近一次 run
+
+无效 run / 题集不一致默认拒绝对比（退出码 2）；确需继续时显式加
+`--allow-invalid-baseline`、`--allow-invalid-candidate`、`--allow-partial`，
+结果会带 quality_warning / compared_cases / skipped 标记并写进报告。
 """
 
 from __future__ import annotations
@@ -90,6 +94,15 @@ class GateResult:
     delta: float
     threshold: float
     common_cases: int
+    compared_cases: int
+    skipped: int
+    missing_in_candidate: tuple[str, ...]
+    missing_in_baseline: tuple[str, ...]
+    partial_compare: bool
+    code_version_changed: bool
+    baseline_git: str
+    candidate_git: str
+    quality_warning: str | None
     evidence: tuple[CaseEvidence, ...]
     failures: tuple[CaseEvidence, ...]
     attribution_counts: Mapping[str, int]
@@ -190,6 +203,8 @@ def _attribute(
     """按固定分类给单题归因；不改变 PASS/FAIL，只进失败清单。"""
     if cand_case is None:
         return "报错", "候选 run 缺少该题"
+    if base_case is None:
+        return "报错", "基线 run 缺少该题"
     if cand_score is None:
         if _is_timeout(cand_case):
             return "超时", _truncate(str(cand_case.get("error") or "超过单题超时"))
@@ -228,10 +243,80 @@ def _resolve_threshold(baseline: Run, variance: float | None) -> float:
     return threshold
 
 
+def _guard_quality(
+    baseline: Run,
+    candidate: Run,
+    *,
+    allow_invalid_baseline: bool,
+    allow_invalid_candidate: bool,
+) -> str | None:
+    """校验两次 run 的有效性；默认拒绝，放行时返回 quality_warning。"""
+    baseline_invalid = baseline.meta.get("valid_for_quality") is False
+    candidate_invalid = candidate.meta.get("valid_for_quality") is False
+    if baseline_invalid and not allow_invalid_baseline:
+        raise GateInputError(
+            "基线 run 是链路验证（valid_for_quality=false），不可作为质量基线；"
+            "如确需对比加 --allow-invalid-baseline"
+        )
+    if candidate_invalid and not allow_invalid_candidate:
+        raise GateInputError(
+            "候选 run 是链路验证（valid_for_quality=false），不可作为质量候选；"
+            "如确需对比加 --allow-invalid-candidate"
+        )
+    parts: list[str] = []
+    if baseline_invalid:
+        parts.append("基线 run 是链路验证（valid_for_quality=false），对比结论仅作链路参考")
+    if candidate_invalid:
+        parts.append("候选 run 是链路验证（valid_for_quality=false），对比结论仅作链路参考")
+    return "；".join(parts) or None
+
+
+def _guard_partial(
+    missing_in_candidate: tuple[str, ...],
+    missing_in_baseline: tuple[str, ...],
+    *,
+    allow_partial: bool,
+) -> None:
+    """题集不一致时默认拒绝；错误里列出两侧缺失题号。"""
+    if allow_partial or not (missing_in_candidate or missing_in_baseline):
+        return
+    parts: list[str] = []
+    if missing_in_candidate:
+        parts.append(f"候选缺 {len(missing_in_candidate)} 题：{','.join(missing_in_candidate)}")
+    if missing_in_baseline:
+        parts.append(f"基线缺 {len(missing_in_baseline)} 题：{','.join(missing_in_baseline)}")
+    raise GateInputError(f"题集不一致：{'；'.join(parts)}；如确需按共同题比较加 --allow-partial")
+
+
+def _decide_status(
+    delta: float, threshold: float, *, code_version_changed: bool
+) -> tuple[GateStatus, str]:
+    """三态 + 结论文案（零差值单独措辞；版本漂移时改为无法归因）。"""
+    epsilon = 1e-12
+    if delta < -threshold - epsilon:
+        status: GateStatus = "FAIL_DEGRADED"
+        conclusion = "退化超出记录噪声"
+    elif delta > threshold + epsilon:
+        status = "WARN_IMPROVED"
+        conclusion = "提升超出记录噪声，需人工复核（可能是工具未触发/裁判漂移/答案变短）"
+    else:
+        status = "PASS"
+        conclusion = "同口径无漂移"
+    if abs(delta) < 1e-9:
+        conclusion = "无差异（两均值完全相同）"
+    if code_version_changed and status != "PASS":
+        conclusion = "含代码版本差异，无法归因，需同版本复跑"
+    return status, conclusion
+
+
 def compare(
     baseline: Run,
     candidate: Run,
     variance: float | None = None,
+    *,
+    allow_invalid_baseline: bool = False,
+    allow_invalid_candidate: bool = False,
+    allow_partial: bool = False,
 ) -> GateResult:
     """比较两个 run 的均值差是否落在记录方差内；纯函数，无 IO。
 
@@ -240,17 +325,35 @@ def compare(
         candidate: 候选 run。
         variance: 记录方差；None 时读 `baseline.meta["recorded_variance"]`，
             再缺省用 0.0408。
+        allow_invalid_baseline: 允许 `valid_for_quality=false` 的基线继续比较。
+        allow_invalid_candidate: 允许无效候选继续比较。
+        allow_partial: 题集不一致时允许只比共同题。
 
     Returns:
-        GateResult：PASS / FAIL + 两均值、阈值、差值、逐题归因。
+        GateResult：三态结论 + 两均值、阈值、差值、逐题归因、有效性/题集/版本标记。
 
     Raises:
-        GateInputError: 输入不合法（缺字段 / 共同题 < 2 / 方差非正）。
+        GateInputError: 输入不合法（无效 run 未放行 / 题集不一致未放行 /
+            缺字段 / 共同题 < 2 / 方差非正）。
     """
     _validate_run(baseline, "baseline")
     _validate_run(candidate, "candidate")
+    quality_warning = _guard_quality(
+        baseline,
+        candidate,
+        allow_invalid_baseline=allow_invalid_baseline,
+        allow_invalid_candidate=allow_invalid_candidate,
+    )
+
     base_cases = _case_map(baseline)
     cand_cases = _case_map(candidate)
+    missing_in_candidate = tuple(sorted(set(base_cases) - set(cand_cases)))
+    missing_in_baseline = tuple(sorted(set(cand_cases) - set(base_cases)))
+    _guard_partial(
+        missing_in_candidate,
+        missing_in_baseline,
+        allow_partial=allow_partial,
+    )
 
     all_ids = sorted(set(base_cases) | set(cand_cases))
     evidence: list[CaseEvidence] = []
@@ -291,20 +394,18 @@ def compare(
             "均值比较无意义；请用 --limit 2 以上复跑或换同题集 run"
         )
 
+    compared_cases = len(common_scores)
+    skipped = len(all_ids) - compared_cases
+    partial_compare = skipped > 0
+    baseline_git = str(baseline.meta.get("git_commit") or "")
+    candidate_git = str(candidate.meta.get("git_commit") or "")
+    code_version_changed = bool(baseline_git and candidate_git and baseline_git != candidate_git)
+
     baseline_mean = sum(item[0] for item in common_scores) / len(common_scores)
     candidate_mean = sum(item[1] for item in common_scores) / len(common_scores)
     delta = candidate_mean - baseline_mean
     threshold = _resolve_threshold(baseline, variance)
-    epsilon = 1e-12
-    if delta < -threshold - epsilon:
-        status: GateStatus = "FAIL_DEGRADED"
-        conclusion = "退化超出记录噪声"
-    elif delta > threshold + epsilon:
-        status = "WARN_IMPROVED"
-        conclusion = "提升超出记录噪声，需人工复核（可能是工具未触发/裁判漂移/答案变短）"
-    else:
-        status = "PASS"
-        conclusion = "同口径无漂移"
+    status, conclusion = _decide_status(delta, threshold, code_version_changed=code_version_changed)
     passed = status != "FAIL_DEGRADED"
 
     failures = tuple(item for item in evidence if item.attribution)
@@ -317,7 +418,13 @@ def compare(
     if failures:
         parts = [f"{label} {counts[label]}" for label in ATTRIBUTION_LABELS if counts.get(label)]
         failure_note = f"；失败归因：{'、'.join(parts)}"
-    reason = f"{status}：{comparison}，{conclusion}{failure_note}"
+    partial_note = ""
+    if partial_compare:
+        partial_note = (
+            f"；仅比较共同题（compared_cases={compared_cases} / skipped={skipped}），"
+            "结论不可跨版本比较"
+        )
+    reason = f"{status}：{comparison}，{conclusion}{partial_note}{failure_note}"
 
     return GateResult(
         status=status,
@@ -328,7 +435,16 @@ def compare(
         candidate_mean=round(candidate_mean, 4),
         delta=round(delta, 4),
         threshold=threshold,
-        common_cases=len(common_scores),
+        common_cases=compared_cases,
+        compared_cases=compared_cases,
+        skipped=skipped,
+        missing_in_candidate=missing_in_candidate,
+        missing_in_baseline=missing_in_baseline,
+        partial_compare=partial_compare,
+        code_version_changed=code_version_changed,
+        baseline_git=baseline_git,
+        candidate_git=candidate_git,
+        quality_warning=quality_warning,
         evidence=tuple(evidence),
         failures=failures,
         attribution_counts=counts,
@@ -350,6 +466,15 @@ def _print_result(result: GateResult, *, as_json: bool) -> None:
             "delta": result.delta,
             "threshold": result.threshold,
             "common_cases": result.common_cases,
+            "compared_cases": result.compared_cases,
+            "skipped": result.skipped,
+            "missing_in_candidate": list(result.missing_in_candidate),
+            "missing_in_baseline": list(result.missing_in_baseline),
+            "partial_compare": result.partial_compare,
+            "code_version_changed": result.code_version_changed,
+            "baseline_git": result.baseline_git,
+            "candidate_git": result.candidate_git,
+            "quality_warning": result.quality_warning,
             "criterion": result.criterion,
             "reason": result.reason,
             "attribution_counts": result.attribution_counts,
@@ -372,6 +497,18 @@ def _print_result(result: GateResult, *, as_json: bool) -> None:
     print(f"candidate: {result.candidate_run_id}  mean={result.candidate_mean:.4f}")
     print(f"共同题   : {result.common_cases}")
     print(f"状态     : {result.status}")
+    if result.quality_warning:
+        print(f"质量警告 : {result.quality_warning}")
+    if result.partial_compare:
+        print(
+            f"题集     : 仅共同题 compared_cases={result.compared_cases} skipped={result.skipped}"
+        )
+    if result.missing_in_candidate:
+        print(f"缺题     : 候选缺 {','.join(result.missing_in_candidate)}")
+    if result.missing_in_baseline:
+        print(f"缺题     : 基线缺 {','.join(result.missing_in_baseline)}")
+    if result.code_version_changed:
+        print(f"代码版本 : {result.baseline_git} vs {result.candidate_git}（含版本差异）")
     print(f"判据     : {result.criterion}")
     print(f"证据     : delta={result.delta:+.4f} 阈值={result.threshold:.4f}")
     for item in result.failures:
@@ -400,6 +537,21 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help=f"记录方差，默认读 baseline.meta 或 {DEFAULT_RECORDED_VARIANCE}",
+    )
+    parser.add_argument(
+        "--allow-invalid-baseline",
+        action="store_true",
+        help="允许 valid_for_quality=false 的基线继续比较（报告带 quality_warning）",
+    )
+    parser.add_argument(
+        "--allow-invalid-candidate",
+        action="store_true",
+        help="允许 valid_for_quality=false 的候选继续比较（报告带 quality_warning）",
+    )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="题集不一致时允许只比较共同题（结果标记 partial_compare/skipped）",
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON 供机器读")
     args = parser.parse_args(argv)
@@ -431,7 +583,14 @@ def main(argv: list[str] | None = None) -> int:
             baseline = store.resolve_run_ref(args.baseline)
             candidate = store.resolve_run_ref(args.candidate)
 
-        result = compare(baseline, candidate, variance=args.variance)
+        result = compare(
+            baseline,
+            candidate,
+            variance=args.variance,
+            allow_invalid_baseline=args.allow_invalid_baseline,
+            allow_invalid_candidate=args.allow_invalid_candidate,
+            allow_partial=args.allow_partial,
+        )
     except (GateInputError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"输入不合法：{exc}", file=sys.stderr)
         return 2
