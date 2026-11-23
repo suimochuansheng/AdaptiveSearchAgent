@@ -3,7 +3,7 @@
 
 卡号：TEG「轻量评测门禁」（补丁基线 83bf142：三态判据 + 评测前探活 + 有效性标记）
 目的：自己构造 fixture，逐条验收 A1~A8（功能有效性）、B1~B7（不变量）、
-      C1~C6（边界观察，发现问题只记 open_issue，不计入失败）。
+      C1~C5（有效性守卫断言，复验 5 个 OI）+ C6~C7（边界观察，只记 open_issue）。
 运行：poetry run python "tests/test_agent_cases/TEG-评测门禁/teg_checks.py"
       （cwd 任意；脚本自己定位仓库根）
 数据与编码：fixture 全部写 tempfile；A1/A6 会真跑一次最小评测（--limit 1），
@@ -435,10 +435,10 @@ def check_a4() -> str:
 
 
 def check_a5() -> str:
-    """valid_for_quality=false：报告顶部警告；并记录 gate 拿它当基线的实际行为。"""
+    """valid_for_quality=false：报告顶部警告；且 gate 默认拒绝把它当基线。"""
     base = store.load_run("teg-base")
     invalid = store.load_run("teg-invalid")
-    res = gate.compare(base, invalid)
+    res = gate.compare(base, invalid, allow_invalid_candidate=True)
     text = report.write_markdown("teg-invalid", res).read_text(encoding="utf-8")
     head = "\n".join(text.splitlines()[:6])
     _assert("链路验证" in head, f"report.md 顶部缺链路验证警告：{head}")
@@ -446,11 +446,9 @@ def check_a5() -> str:
 
     proc = _gate_cli("--baseline", _run_dir("teg-invalid"), "--candidate", _run_dir("teg-base"))
     combined = proc.stdout + proc.stderr
-    hinted = any(
-        word in combined for word in ("链路验证", "valid_for_quality", "不可用于质量结论", "有效性")
-    )
-    behavior = "有提示/拒绝" if hinted else "静默采用（无提示、无拒绝）-> 记 OI-TEG-001"
-    return f"报告顶部有链路验证警告；gate 以无效 run 为基线 exit={proc.returncode}，{behavior}"
+    _assert(proc.returncode == 2, f"无效基线默认应被拒绝（exit 2），实际 {proc.returncode}")
+    _assert("不可作为质量基线" in combined, f"缺可读拒绝原因：{combined[-300:]}")
+    return "报告顶部有链路验证警告；无效基线默认被 gate 拒绝（exit 2），OI-TEG-001 已闭合"
 
 
 # --------------------------------------------------------------------------- A6
@@ -737,49 +735,144 @@ def check_b7() -> str:
 
 
 def check_c1() -> str:
-    """题集不一致：gate 是否指出缺哪一题。"""
-    base = store.load_run("teg-base")
-    partial = store.load_run("teg-partial")
-    res = gate.compare(base, partial)
-    by_id = {item.case_id: item for item in res.evidence}
-    missing = by_id.get("q003")
-    extra = by_id.get("q004")
-    proc = _gate_cli("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-partial"))
-    shown = "q003" in proc.stdout and "缺少" in proc.stdout
-    named = bool(missing and missing.attribution) and shown
-    extra_marked = bool(extra and extra.attribution)
-    detail = (
-        f"候选缺 q003：{'已指出' if named else '未指出'}；"
-        f"候选多出 q004：{'已标记' if extra_marked else '未标记（归因空，CLI 不打印）'}"
+    """无效基线：默认拒绝（exit 2）；--allow-invalid-baseline 放行且 quality_warning 非空。"""
+    refused = _gate_cli("--baseline", _run_dir("teg-invalid"), "--candidate", _run_dir("teg-base"))
+    combined = refused.stdout + refused.stderr
+    _no_traceback(combined)
+    _assert(refused.returncode == 2, f"无效基线默认应 exit 2，实际 {refused.returncode}")
+    _assert("不可作为质量基线" in combined, f"拒绝原因缺可读说明：{combined[-300:]}")
+
+    allowed = _gate_cli(
+        "--baseline",
+        _run_dir("teg-invalid"),
+        "--candidate",
+        _run_dir("teg-base"),
+        "--allow-invalid-baseline",
+        "--json",
     )
-    if not (named and extra_marked):
-        detail += " -> 记 OI-TEG-002"
-    return detail
+    _no_traceback(allowed.stdout + allowed.stderr)
+    _assert(
+        allowed.returncode == 0,
+        f"放行后应 exit 0，实际 {allowed.returncode}：{allowed.stderr[-300:]}",
+    )
+    payload = json.loads(allowed.stdout)
+    warning = str(payload.get("quality_warning") or "")
+    _assert(bool(warning.strip()), "放行后 quality_warning 为空")
+    _assert("链路验证" in warning, f"quality_warning 未说明链路验证：{warning!r}")
+    return (
+        f"默认 exit=2（不可作为质量基线）；--allow-invalid-baseline 放行，"
+        f"quality_warning={warning[:48]}"
+    )
 
 
 # --------------------------------------------------------------------------- C2
 
 
 def check_c2() -> str:
-    """分数全同（delta=0）：是否 PASS 并说明无差异。"""
-    base = store.load_run("teg-base")
-    same = store.load_run("teg-same")
-    res = gate.compare(base, same)
-    _assert(res.status == "PASS", f"全同分数应为 PASS，实际 {res.status}")
-    _assert(res.delta == 0, f"全同分数 delta 应为 0，实际 {res.delta}")
-    says_no_diff = (
-        "无差异" in res.reason
-        or "无差异"
-        in _gate_cli("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-same")).stdout
+    """题集不一致：默认拒绝并列出两侧缺题；--allow-partial 标记 compared/skipped。"""
+    refused = _gate_cli("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-partial"))
+    combined = refused.stdout + refused.stderr
+    _no_traceback(combined)
+    _assert(refused.returncode == 2, f"题集不一致默认应 exit 2，实际 {refused.returncode}")
+    for needle in ("题集不一致", "候选缺 1 题：q003", "基线缺 1 题：q004"):
+        _assert(needle in combined, f"拒绝原因缺 {needle!r}：{combined[-300:]}")
+
+    allowed = _gate_cli(
+        "--baseline",
+        _run_dir("teg-base"),
+        "--candidate",
+        _run_dir("teg-partial"),
+        "--allow-partial",
+        "--json",
     )
-    suffix = "" if says_no_diff else " -> 未直说'无差异'，记 OI-TEG-003"
-    return f"PASS，delta=0.0000，reason={res.reason!r}{suffix}"
+    _no_traceback(allowed.stdout + allowed.stderr)
+    _assert(
+        allowed.returncode == 0,
+        f"放行后应 exit 0，实际 {allowed.returncode}：{allowed.stderr[-300:]}",
+    )
+    payload = json.loads(allowed.stdout)
+    _assert(
+        payload["compared_cases"] == 2,
+        f"compared_cases 应为 2，实际 {payload['compared_cases']}",
+    )
+    _assert(payload["skipped"] == 2, f"skipped 应为 2，实际 {payload['skipped']}")
+    _assert(payload["partial_compare"] is True, "partial_compare 应为 true")
+    _assert(
+        payload["missing_in_candidate"] == ["q003"],
+        f"missing_in_candidate={payload['missing_in_candidate']}",
+    )
+    _assert(
+        payload["missing_in_baseline"] == ["q004"],
+        f"missing_in_baseline={payload['missing_in_baseline']}",
+    )
+    return "默认 exit=2（候选缺 q003/基线缺 q004）；--allow-partial 后 compared_cases=2、skipped=2"
 
 
 # --------------------------------------------------------------------------- C3
 
 
 def check_c3() -> str:
+    """零差值：reason 必须含「无差异」。"""
+    res = gate.compare(store.load_run("teg-base"), store.load_run("teg-same"))
+    _assert(res.delta == 0, f"全同分数 delta 应为 0，实际 {res.delta}")
+    _assert("无差异" in res.reason, f"零差值 reason 未含 无差异：{res.reason!r}")
+    out = _gate_cli("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-same")).stdout
+    _assert("无差异" in out, "CLI 输出未含 无差异")
+    return f"delta=0.0000，reason={res.reason!r}"
+
+
+# --------------------------------------------------------------------------- C4
+
+
+def check_c4() -> str:
+    """--limit 1：meta partial=true/publishable=false，report 顶部不可用于发布。"""
+    meta = _A1.get("meta") or {}
+    text = _A1.get("report") or ""
+    _assert(bool(meta), "A1 未产出 meta，无法断言 --limit 1")
+    _assert(meta.get("partial") is True, f"meta.partial 应为 true，实际 {meta.get('partial')!r}")
+    _assert(
+        meta.get("publishable") is False,
+        f"meta.publishable 应为 false，实际 {meta.get('publishable')!r}",
+    )
+    _assert(meta.get("dataset_size") == 20 and meta.get("n_cases") == 1, "预期 20 题里跑 1 题")
+    head = "\n".join(text.splitlines()[:8])
+    _assert("不可用于发布" in head, f"report 顶部缺 不可用于发布 警告：{head}")
+    _assert("非全量" in head, f"report 顶部缺 非全量 标注：{head}")
+    return "meta partial=true/publishable=false；report 顶部含 非全量/不可用于发布"
+
+
+# --------------------------------------------------------------------------- C5
+
+
+def check_c5() -> str:
+    """两 run git 不同：code_version_changed=true，报告写不能归因于配置开关。"""
+    base = store.load_run("teg-base")
+    drift = store.load_run("teg-git-drift")
+    res = gate.compare(base, drift)
+    _assert(res.code_version_changed is True, "code_version_changed 应为 true")
+    _assert(
+        res.baseline_git == "aaaaaaa" and res.candidate_git == "bbbbbbb",
+        f"git 字段不对：{res.baseline_git} vs {res.candidate_git}",
+    )
+    payload = json.loads(
+        _gate_cli(
+            "--baseline",
+            _run_dir("teg-base"),
+            "--candidate",
+            _run_dir("teg-git-drift"),
+            "--json",
+        ).stdout
+    )
+    _assert(payload["code_version_changed"] is True, "JSON code_version_changed 应为 true")
+    text = report.write_markdown("teg-git-drift", res).read_text(encoding="utf-8")
+    _assert("不能归因于配置开关" in text, "report 缺 不能归因于配置开关 提示")
+    return "code_version_changed=true（aaaaaaa vs bbbbbbb）；report 含 不能归因于配置开关"
+
+
+# --------------------------------------------------------------------------- C6
+
+
+def check_c6() -> str:
     """失败 case 超 10 条：report 是否截断并说明。"""
     base = store.load_run("teg-twelve-base")
     cand = store.load_run("teg-twelve-cand")
@@ -796,49 +889,12 @@ def check_c3() -> str:
     return f"{len(res.failures)} 条失败 -> 列出 {len(rows)} 条，注明另有 2 条未列出"
 
 
-# --------------------------------------------------------------------------- C4
+# --------------------------------------------------------------------------- C7
 
 
-def check_c4() -> str:
-    """--limit 1 的 meta / report 是否标注非全量、结论不可用于发布。"""
-    meta = _A1.get("meta") or {}
-    text = _A1.get("report") or ""
-    _assert(bool(meta), "A1 未产出 meta，无法观察 --limit 1")
-    blob = json.dumps(meta, ensure_ascii=False) + text
-    markers = [word for word in ("非全量", "不可用于发布", "样本不全", "抽样") if word in blob]
-    partial_marked = meta.get("dataset_size") == 20 and meta.get("n_cases") == 1
-    _assert(
-        partial_marked, f"预期 A1 为 20 题里跑 1 题，实际 dataset_size={meta.get('dataset_size')}"
-    )
-    suffix = (
-        ""
-        if markers
-        else " -> 有 dataset_size/n_cases 但无'非全量/不可用于发布'字样，记 OI-TEG-004"
-    )
-    return f"dataset_size=20、n_cases=1；标注字段={markers or '无'}{suffix}"
-
-
-# --------------------------------------------------------------------------- C5
-
-
-def check_c5() -> str:
-    """两次 run 的 git 哈希不同：gate 是否提示代码版本已变。"""
-    base = store.load_run("teg-base")
-    drift = store.load_run("teg-git-drift")
-    proc = _gate_cli("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-git-drift"))
-    combined = proc.stdout + proc.stderr
-    res = gate.compare(base, drift)
-    hinted = any(word in combined for word in ("代码版本", "git_commit", "版本已变", "commit"))
-    suffix = "" if hinted else " -> 无任何版本提示，结论仍照常给出，记 OI-TEG-005"
-    return f"baseline git=aaaaaaa，candidate git=bbbbbbb；gate 结论={res.status}，版本提示={'有' if hinted else '无'}{suffix}"
-
-
-# --------------------------------------------------------------------------- C6
-
-
-def check_c6() -> str:
+def check_c7() -> str:
     """results 下 ci-smoke/ 这类子目录：latest_run() 不应误选。"""
-    root = _WORK / "c6-results"
+    root = _WORK / "c7-results"
     _make_fixture(
         "20261123-100000-direct", [_case("q001", 9)], root=root, created_at="2026-11-23T10:00:00"
     )
@@ -891,12 +947,13 @@ CHECKS: list[tuple[str, Any]] = [
     ("B5 无前端产物/无服务启动代码", check_b5),
     ("B6 docs/baseline.md 数字未动", check_b6),
     ("B7 台账无开发窗口写的 TEG 行", check_b7),
-    ("C1 观察：题集不一致是否指出缺题", check_c1),
-    ("C2 观察：分数全同是否 PASS 且说明无差异", check_c2),
-    ("C3 观察：失败 case 超 10 条是否截断", check_c3),
-    ("C4 观察：--limit 1 是否标注非全量", check_c4),
-    ("C5 观察：git 哈希不同是否提示版本变化", check_c5),
-    ("C6 观察：ci-smoke 子目录是否被 latest_run 误选", check_c6),
+    ("C1 无效基线默认拒绝 + 放行记 quality_warning", check_c1),
+    ("C2 题集不一致默认拒绝 + --allow-partial 标记", check_c2),
+    ("C3 零差值 reason 含「无差异」", check_c3),
+    ("C4 --limit 1 标 partial/publishable + 报告警告", check_c4),
+    ("C5 git 版本不同 code_version_changed + 报告提示", check_c5),
+    ("C6 观察：失败 case 超 10 条是否截断", check_c6),
+    ("C7 观察：ci-smoke 子目录是否被 latest_run 误选", check_c7),
 ]
 
 
