@@ -19,13 +19,18 @@ CI 没有模型凭据，**不跑 `evals/run.py`**；`.github/workflows/eval-gate
 
 ## 2. 判据原文与来历
 
-> 同口径两次均值差 <= 记录方差（默认 **0.0408**）；单题差值只做归因，不单独判失败。
+> `candidate - baseline` 落在 ±记录方差（默认 **0.0408**）内为 `PASS`；
+> 低于 `-方差` 为 `FAIL_DEGRADED`；高于 `+方差` 为 `WARN_IMPROVED`。
 
 - `0.0408` 来自 `docs/baseline.md` §4：Ragas `faithfulness` 同口径两次实测
   `0.8509` / `0.8101`，差 `0.0408`，取三项指标里最大的实测差作为记录方差；
-- 门禁**不发明新阈值**，也**不改成"分数变低就失败"**：单次比较会被裁判噪声误判；
-- 判据是**双侧**的：`|candidate_mean - baseline_mean| <= 方差`。提升幅度超过方差同样判 FAIL，
-  表示"变化超出记录噪声、不可用旧基线解释"，不等于"变好了"；
+- 门禁**不发明新阈值**，也**不按单题分数下降判失败**：单题只做归因，判定看均值；
+- 三态含义：
+  - `PASS`：变化在记录噪声内，同口径无漂移；
+  - `WARN_IMPROVED`：提升超出记录噪声，**不直接放行**，需人工复核（可能是工具未触发 /
+    裁判漂移 / 答案变短），CLI 退出码 0 但报告保留 WARN；
+  - `FAIL_DEGRADED`：退化超出记录噪声，CLI 退出码 1；
+- CLI：`PASS` / `WARN_IMPROVED` -> 0，`FAIL_DEGRADED` -> 1，输入不合法 -> 2；
 - 少于 2 道共同有效题、方差 <= 0、per_case 缺字段都直接给可读错误（退出码 2），不猜。
 
 ## 3. 怎么跑
@@ -37,13 +42,16 @@ eval $(poetry env activate)
 # 1) 真实评测：单配置 1 题冒烟（产物三件套）
 python -m evals.run --configs A --limit 1
 
+# 1b) 环境未就绪时只验链路（meta.valid_for_quality=false，报告顶部带警告）
+python -m evals.run --configs A --limit 1 --allow-degraded
+
 # 2) 配置矩阵：A 全关 / B 治理 / C +审批
 python -m evals.run --configs A,B,C --set golden20
 
 # 3) 跑完与同数据集上一次 run 对比并写进报告
 python -m evals.run --configs A,B --compare last
 
-# 4) 只看门禁（退出码 0=PASS / 1=FAIL / 2=输入不合法）
+# 4) 只看门禁（退出码 0=PASS/WARN / 1=FAIL_DEGRADED / 2=输入不合法）
 python -m evals.gate --baseline <run_id|path> --candidate <run_id|path>
 python -m evals.gate --compare last
 
@@ -58,6 +66,10 @@ python -m evals.backfill \
 
 产物：`evals/results/<run_id>/meta.json` + `per_case.json` + `report.md`（默认 gitignore）。
 每个 config 一个独立后端子进程，启动时注入 `evals/configs.py` 的 env，跑完即停。
+
+开跑前探活 RAG `/health`、模型一次极短调用、PG / Redis TCP 可达；任一失败默认拒绝开跑
+（退出码 2，打印 `环境未就绪：rag` 这类可读原因）。`--allow-degraded` 可继续跑，
+但 `meta.valid_for_quality=false`、`invalid_reason` 记录原因、报告顶部显示链路验证警告。
 
 ## 4. 配置矩阵
 
@@ -85,4 +97,6 @@ python -m evals.backfill \
   超出阈值先看裁判波动 / 环境，再谈退化；
 - `latency_ms` / `tokens` 来自现有 SSE；`tokens` 在会话端点没有 kpi 帧时为 `null`，
   报告不据此判定；
-- 门禁只比较**共同有效题**：某题候选失败（无分数）不计入均值，但会在失败清单里归因。
+- 门禁只比较**共同有效题**：某题候选失败（无分数）不计入均值，但会在失败清单里归因；
+- `valid_for_quality=false` 的 run（如 2026-11-23 的 3 个链路验证 run）分数不可用于质量结论；
+  历史 report.md 是补丁前生成的，可能没有顶部警告，以 meta 标注为准。

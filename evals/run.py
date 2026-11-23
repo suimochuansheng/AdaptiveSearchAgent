@@ -4,13 +4,16 @@
 - 本脚本**真跑模型**（起本地后端 + Ollama / RAG 网关 + 裁判），只在本地或发版时用；
 - CI 不跑本脚本，只跑 `scripts/smoke_eval_gate.py`（fixture 数据，零模型调用）；
 - 每个 config 一个独立后端进程，启动时把 `evals/configs.py` 的 env 直接注入，
-  跑完即停，避免开关串味。
+  跑完即停，避免开关串味；
+- 开跑前探活 RAG / 模型 / PG / Redis；失败默认拒绝开跑（退出码 2），
+  显式 `--allow-degraded` 才继续，并在 meta 标 `valid_for_quality=false`。
 
 用法：
 
     python -m evals.run --configs A --limit 1
     python -m evals.run --configs A,B,C --set golden20
     python -m evals.run --configs A,B --compare last
+    python -m evals.run --configs A --limit 1 --allow-degraded
 
 产物：`evals/results/<run_id>/{meta.json,per_case.json,report.md}`。
 """
@@ -23,6 +26,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -67,6 +71,113 @@ def _health_ok(base_url: str, timeout: float = 1.0) -> bool:
         return response.status_code == 200
     except httpx.HTTPError:
         return False
+
+
+#: 评测前探活的单项超时（秒）；模型首次加载可能慢，单独放宽。
+PREFLIGHT_TIMEOUT = 5.0
+MODEL_PROBE_TIMEOUT = 30.0
+
+
+def _probe_rag() -> tuple[bool, str]:
+    base = (settings.INGEST_SERVICE_URL or "").rstrip("/")
+    if not base:
+        return False, "INGEST_SERVICE_URL 为空"
+    try:
+        response = httpx.get(f"{base}/health", timeout=PREFLIGHT_TIMEOUT)
+    except httpx.HTTPError as exc:
+        return False, f"{base}/health 不可达（{type(exc).__name__}: {exc}）"
+    if response.status_code != 200:
+        return False, f"{base}/health -> HTTP {response.status_code}"
+    return True, f"{base}/health -> 200"
+
+
+def _probe_model() -> tuple[bool, str]:
+    """一次极短调用，确认模型真的能出 token（不是只看端口）。"""
+    provider = str(getattr(settings, "llm_provider", "ollama") or "ollama")
+    try:
+        if provider == "deepseek":
+            base = (settings.openai_base_url or "").rstrip("/")
+            model = settings.DEEPSEEK_MODEL_NAME
+            if not base or not model or not settings.deepseek_api_key:
+                return False, "DeepSeek 配置不完整（openai_base_url / model / api_key）"
+            client = OpenAI(base_url=base, api_key=settings.deepseek_api_key)
+            client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+                temperature=0.0,
+                timeout=MODEL_PROBE_TIMEOUT,
+            )
+            return True, f"{model} 可调用"
+
+        base = (settings.ollama_base_url or "").rstrip("/")
+        model = settings.ollama_model_name
+        if not base or not model:
+            return False, "Ollama 配置不完整（ollama_base_url / ollama_model_name）"
+        response = httpx.post(
+            f"{base}/api/generate",
+            json={
+                "model": model,
+                "prompt": "ping",
+                "stream": False,
+                "options": {"num_predict": 1},
+            },
+            timeout=MODEL_PROBE_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001 - 探活失败要变成可读原因，不抛栈
+        return False, f"模型调用失败（{type(exc).__name__}: {exc}）"
+    if response.status_code != 200:
+        return False, f"Ollama /api/generate -> HTTP {response.status_code}: {response.text[:120]}"
+    return True, f"{model} 可调用"
+
+
+def _tcp_reachable(host: str, port: int, timeout: float = 3.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _probe_pg() -> tuple[bool, str]:
+    host = settings.postgres_host or ""
+    port = settings.postgres_port or 5432
+    if not host:
+        return False, "postgres_host 为空"
+    ok = _tcp_reachable(host, port)
+    return ok, f"{host}:{port} {'可达' if ok else '不可达'}"
+
+
+def _probe_redis() -> tuple[bool, str]:
+    raw = settings.REDIS_URL or ""
+    if not raw:
+        return False, "REDIS_URL 为空"
+    parsed = urlparse(raw)
+    host = parsed.hostname or ""
+    port = parsed.port or 6379
+    if not host:
+        return False, f"REDIS_URL 解析不到 host：{raw}"
+    ok = _tcp_reachable(host, port)
+    return ok, f"{host}:{port} {'可达' if ok else '不可达'}"
+
+
+def _probe_environment() -> tuple[dict[str, Any], dict[str, str]]:
+    """探活 RAG / 模型 / PG / Redis；返回 meta.environment 与失败原因。"""
+    checks = (
+        ("rag", _probe_rag),
+        ("model", _probe_model),
+        ("pg", _probe_pg),
+        ("redis", _probe_redis),
+    )
+    environment: dict[str, Any] = {}
+    details: dict[str, str] = {}
+    for name, probe in checks:
+        ok, detail = probe()
+        environment[f"{name}_ok"] = ok
+        if not ok:
+            details[name] = detail
+    environment["checked_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    return environment, details
 
 
 def _tail(path: Path, lines: int = 20) -> str:
@@ -305,8 +416,8 @@ def _print_diff(result: gate.GateResult) -> None:
     print(f"分题对比（{result.candidate_run_id} vs {result.baseline_run_id}）：")
     print("case      base  cand  diff    归因")
     for item in result.evidence:
-        base = "—" if item.baseline_score is None else f"{item.baseline_score:.0f}"
-        cand = "—" if item.candidate_score is None else f"{item.candidate_score:.0f}"
+        base = "—" if item.baseline_score is None else f"{item.baseline_score:.2f}"
+        cand = "—" if item.candidate_score is None else f"{item.candidate_score:.2f}"
         delta = "—" if item.delta is None else f"{item.delta:+.2f}"
         print(f"{item.case_id:<9} {base:<5} {cand:<5} {delta:<7} {item.attribution or '—'}")
     print(result.reason)
@@ -320,6 +431,9 @@ def _run_one(
     dataset_size: int,
     args: argparse.Namespace,
     judge_client: OpenAI,
+    environment: dict[str, Any],
+    valid_for_quality: bool,
+    invalid_reason: str,
 ) -> tuple[str, bool]:
     run_id = store.new_run_id()
     log_path = store.RESULTS_DIR / ".logs" / f"{run_id}.log"
@@ -365,6 +479,9 @@ def _run_one(
             args.variance if args.variance is not None else gate.DEFAULT_RECORDED_VARIANCE
         ),
         "backend": "external" if args.use_running_backend else "managed",
+        "environment": environment,
+        "valid_for_quality": valid_for_quality,
+        "invalid_reason": invalid_reason,
     }
     store.save_run(run_id, meta, results)
     print(f"[{config.id}] 已落库：{store.RESULTS_DIR / run_id}", flush=True)
@@ -409,6 +526,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="复用已在运行的后端（不注入 config 开关，仅排障用）",
     )
+    parser.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        help="环境探活失败仍开跑（只验链路；meta.valid_for_quality=false）",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -423,6 +545,35 @@ def main(argv: list[str] | None = None) -> int:
     except EvalRunError as exc:
         print(f"输入不合法：{exc}", file=sys.stderr)
         return 2
+
+    environment, failures = _probe_environment()
+    probe_text = " ".join(
+        f"{key.removesuffix('_ok')}={'ok' if value else 'fail'}"
+        for key, value in environment.items()
+        if key.endswith("_ok")
+    )
+    print(f"环境探活：{probe_text}", flush=True)
+    if failures:
+        print("环境未就绪：" + ", ".join(failures), file=sys.stderr)
+        for name, detail in failures.items():
+            print(f"  - {name}: {detail}", file=sys.stderr)
+        if not args.allow_degraded:
+            print(
+                "拒绝开跑；如只验链路，可加 --allow-degraded（meta 会标 valid_for_quality=false）",
+                file=sys.stderr,
+            )
+            return 2
+        valid_for_quality = False
+        invalid_reason = "环境未就绪：" + "; ".join(
+            f"{name}: {detail}" for name, detail in failures.items()
+        )
+        print(
+            f"warn: --allow-degraded 已开启，meta.valid_for_quality=false；{invalid_reason}",
+            flush=True,
+        )
+    else:
+        valid_for_quality = True
+        invalid_reason = ""
 
     judge_client = OpenAI(
         base_url=settings.ALIYUN_QWEN_BASE_URL,
@@ -446,6 +597,9 @@ def main(argv: list[str] | None = None) -> int:
                 dataset_size,
                 args,
                 judge_client,
+                environment,
+                valid_for_quality,
+                invalid_reason,
             )
         except EvalRunError as exc:
             print(f"评测失败：{exc}", file=sys.stderr)

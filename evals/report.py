@@ -14,10 +14,11 @@
 from __future__ import annotations
 
 import statistics
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from evals import store
-from evals.gate import GateInputError, GateResult, Run
+from evals.gate import CRITERION, GateInputError, GateResult, Run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,6 +70,30 @@ def _matrix_runs(candidate: Run) -> list[Run]:
     return same or runs
 
 
+def _environment_text(meta: Mapping[str, Any]) -> str:
+    environment = meta.get("environment")
+    if not isinstance(environment, Mapping):
+        return "未记录（历史 run）"
+    parts = []
+    for key in ("rag_ok", "model_ok", "pg_ok", "redis_ok"):
+        value = environment.get(key)
+        label = key.removesuffix("_ok")
+        parts.append(f"{label}={'ok' if value is True else 'fail'}")
+    checked_at = environment.get("checked_at")
+    if checked_at:
+        parts.append(f"checked_at={checked_at}")
+    return " ".join(parts)
+
+
+def _validity_text(meta: Mapping[str, Any]) -> str:
+    valid = meta.get("valid_for_quality")
+    if valid is True:
+        return "✅ 可用于质量结论"
+    if valid is False:
+        return "⚠️ 不可用于质量结论（链路验证）"
+    return "未记录（历史 run）"
+
+
 def _meta_section(run: Run, report_path: Path) -> list[str]:
     meta = run.meta
     flags = meta.get("flags") or {}
@@ -86,6 +111,8 @@ def _meta_section(run: Run, report_path: Path) -> list[str]:
         f"| 裁判 | {_cell(meta.get('judge_model'))} |",
         f"| 样本数 | {len(run.per_case)}（有效 {scored}） |",
         f"| 代码版本 | `{_cell(meta.get('git_commit'))}` |",
+        f"| 有效性 | {_validity_text(meta)} |",
+        f"| 环境探活 | {_cell(_environment_text(meta))} |",
         f"| 数据集 | {_cell(meta.get('dataset'))} |",
         f"| 数据集 sha256 | `{_cell(str(meta.get('dataset_sha256') or '')[:16])}…` |",
         f"| 开关快照 | `{_cell(flag_text)}` |",
@@ -139,11 +166,7 @@ def _diff_section(result: GateResult | None) -> list[str]:
 
 def _conclusion_section(result: GateResult | None) -> list[str]:
     lines = ["## 4. 结论", ""]
-    criterion = (
-        result.criterion
-        if result is not None
-        else ("同口径两次均值差 <= 记录方差（默认 0.0408）；单题差值只做归因，不单独判失败")
-    )
+    criterion = result.criterion if result is not None else CRITERION
     lines.append(f"> 判据原文：{criterion}")
     lines.append("")
     if result is None:
@@ -199,6 +222,13 @@ def write_markdown(run_id: str, compare_result: GateResult | None) -> Path:
     lines = [
         f"# 评测报告 — {run_id}",
         "",
+    ]
+    if run.meta.get("valid_for_quality") is False:
+        lines += [
+            "> ⚠️ 本次为链路验证 run，环境未就绪，分数不可用于质量结论",
+            "",
+        ]
+    lines += [
         f"> 配置 {run.meta.get('config_id')} / 数据集 {run.meta.get('dataset')}；"
         "本报告由 `evals/report.py` 自动生成，结论句来自 `evals/gate.py`。",
         "",

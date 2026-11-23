@@ -1,15 +1,17 @@
 """评测门禁判定 —— 纯函数，零 IO 副作用（CI 可跑）。
 
-判据（沿用 docs/baseline.md §4 的既有口径，不另发明）：
+判据（三态，替代原来的双侧 `abs()`）：
 
-    同口径两次均值差 <= 记录方差（默认 0.0408）
-    单题差值只做归因，不单独判失败
+    delta = mean(candidate) - mean(baseline)
+    delta < -variance          -> FAIL_DEGRADED（退化超出记录噪声）
+    delta > +variance          -> WARN_IMPROVED（提升超出记录噪声，需人工复核）
+    其余                       -> PASS（同口径无漂移）
 
 `compare()` 只吃两个 run 的 meta + per_case，返回 `GateResult`；不读写文件、
 不调模型。CLI 才做 IO（加载 run、打印结论），退出码：
 
-    0 = PASS
-    1 = FAIL
+    0 = PASS / WARN_IMPROVED
+    1 = FAIL_DEGRADED
     2 = 输入不合法（缺字段、样本不足、方差非正）
 
 命令行：
@@ -27,7 +29,7 @@ import math
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 #: docs/baseline.md §4 实测记录方差（faithfulness 两次最大差）。
 DEFAULT_RECORDED_VARIANCE = 0.0408
@@ -42,7 +44,12 @@ DEFAULT_TIMEOUT_MS = 300_000
 ATTRIBUTION_LABELS = ("工具未调用", "答案退化", "超时", "报错")
 
 #: 判据原文（报告里原样引用）。
-CRITERION = "同口径两次均值差 <= 记录方差（默认 0.0408）；单题差值只做归因，不单独判失败"
+CRITERION = (
+    "candidate - baseline 落在 ±记录方差内为 PASS；"
+    "低于 -方差为 FAIL_DEGRADED；高于 +方差为 WARN_IMPROVED"
+)
+
+GateStatus = Literal["PASS", "WARN_IMPROVED", "FAIL_DEGRADED"]
 
 
 class GateInputError(ValueError):
@@ -74,7 +81,7 @@ class CaseEvidence:
 class GateResult:
     """门禁结论 + 每项证据；报告只从这些字段拼结论，不手写。"""
 
-    verdict: str
+    status: GateStatus
     passed: bool
     baseline_run_id: str
     candidate_run_id: str
@@ -88,6 +95,11 @@ class GateResult:
     attribution_counts: Mapping[str, int]
     criterion: str
     reason: str
+
+    @property
+    def verdict(self) -> str:
+        """向后兼容别名：旧调用方读 `verdict` 时等于三态 `status`。"""
+        return self.status
 
 
 def _as_float(value: Any, *, field: str, case_id: str) -> float:
@@ -283,26 +295,32 @@ def compare(
     candidate_mean = sum(item[1] for item in common_scores) / len(common_scores)
     delta = candidate_mean - baseline_mean
     threshold = _resolve_threshold(baseline, variance)
-    passed = abs(delta) <= threshold + 1e-12
+    epsilon = 1e-12
+    if delta < -threshold - epsilon:
+        status: GateStatus = "FAIL_DEGRADED"
+        conclusion = "退化超出记录噪声"
+    elif delta > threshold + epsilon:
+        status = "WARN_IMPROVED"
+        conclusion = "提升超出记录噪声，需人工复核（可能是工具未触发/裁判漂移/答案变短）"
+    else:
+        status = "PASS"
+        conclusion = "同口径无漂移"
+    passed = status != "FAIL_DEGRADED"
 
     failures = tuple(item for item in evidence if item.attribution)
     counts = dict.fromkeys(ATTRIBUTION_LABELS, 0)
     for item in failures:
         counts[item.attribution] = counts.get(item.attribution, 0) + 1
 
-    verdict = "PASS" if passed else "FAIL"
-    comparison = (
-        f"|{candidate_mean:.4f} - {baseline_mean:.4f}| = {abs(delta):.4f} "
-        f"{'<=' if passed else '>'} 记录方差 {threshold:.4f}"
-    )
+    comparison = f"candidate-baseline = {delta:+.4f}，记录方差 {threshold:.4f}"
     failure_note = ""
     if failures:
         parts = [f"{label} {counts[label]}" for label in ATTRIBUTION_LABELS if counts.get(label)]
         failure_note = f"；失败归因：{'、'.join(parts)}"
-    reason = f"{verdict}：{comparison}{failure_note}"
+    reason = f"{status}：{comparison}，{conclusion}{failure_note}"
 
     return GateResult(
-        verdict=verdict,
+        status=status,
         passed=passed,
         baseline_run_id=baseline.run_id,
         candidate_run_id=candidate.run_id,
@@ -322,6 +340,7 @@ def compare(
 def _print_result(result: GateResult, *, as_json: bool) -> None:
     if as_json:
         payload = {
+            "status": result.status,
             "verdict": result.verdict,
             "passed": result.passed,
             "baseline_run_id": result.baseline_run_id,
@@ -352,18 +371,21 @@ def _print_result(result: GateResult, *, as_json: bool) -> None:
     print(f"baseline : {result.baseline_run_id}  mean={result.baseline_mean:.4f}")
     print(f"candidate: {result.candidate_run_id}  mean={result.candidate_mean:.4f}")
     print(f"共同题   : {result.common_cases}")
+    print(f"状态     : {result.status}")
     print(f"判据     : {result.criterion}")
     print(f"证据     : delta={result.delta:+.4f} 阈值={result.threshold:.4f}")
     for item in result.failures:
-        base = "—" if item.baseline_score is None else f"{item.baseline_score:.0f}"
-        cand = "—" if item.candidate_score is None else f"{item.candidate_score:.0f}"
+        base = "—" if item.baseline_score is None else f"{item.baseline_score:.2f}"
+        cand = "—" if item.candidate_score is None else f"{item.candidate_score:.2f}"
         print(f"  [{item.attribution}] {item.case_id}: {base} -> {cand} | {item.detail}")
     print(result.reason)
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI：加载 run、比较、打印；退出码 0/1/2。"""
-    parser = argparse.ArgumentParser(description="评测门禁：两次 run 的均值差是否 <= 记录方差")
+    parser = argparse.ArgumentParser(
+        description="评测门禁：三态判定（PASS / WARN_IMPROVED / FAIL_DEGRADED）"
+    )
     parser.add_argument("--baseline", default="", help="基线 run_id 或路径（meta.json / run 目录）")
     parser.add_argument("--candidate", default="", help="候选 run_id 或路径")
     parser.add_argument(
