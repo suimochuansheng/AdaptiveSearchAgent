@@ -1,0 +1,970 @@
+#!/usr/bin/env python
+"""TEG 轻量评测门禁 —— 测试窗口独立验收（不照抄开发冒烟脚本）。
+
+卡号：TEG「轻量评测门禁」（补丁基线 83bf142：三态判据 + 评测前探活 + 有效性标记）
+目的：自己构造 fixture，逐条验收 A1~A8（功能有效性）、B1~B7（不变量）、
+      C1~C6（边界观察，发现问题只记 open_issue，不计入失败）。
+运行：poetry run python "tests/test_agent_cases/TEG-评测门禁/teg_checks.py"
+      （cwd 任意；脚本自己定位仓库根）
+数据与编码：fixture 全部写 tempfile；A1/A6 会真跑一次最小评测（--limit 1），
+      产物落 gitignore 的 evals/results/；台账只读，本脚本不改台账。
+      本脚本 UTF-8；台账 GB18030（显式 encoding）。
+只读边界：不改 evals/ scripts/ .github/ docs/ 与业务代码；不启动常驻服务。
+退出码：0 = 全部通过；1 = 有 [FAIL]。
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import io
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+_REPO = Path(__file__).resolve().parents[3]
+_RESULTS = _REPO / "evals" / "results"
+_LEDGER = _REPO / "tests" / "test_agent_cases" / "台账用例.csv"
+_DATASETS = _REPO / "evals" / "datasets"
+_SCHEMA_SHA = "c48c9d4886caf77908fe850229bc04ae9b7ea60b3750bdba707ff815fcea2a99"
+_META_REQUIRED = (
+    "run_id",
+    "created_at",
+    "config_id",
+    "model",
+    "judge_model",
+    "n_cases",
+    "git_commit",
+    "flags",
+    "schema_sha256",
+    "environment",
+    "valid_for_quality",
+)
+_ENV_KEYS = ("rag_ok", "model_ok", "pg_ok", "redis_ok", "checked_at")
+_CASE_KEYS = (
+    "case_id",
+    "question",
+    "answer_digest",
+    "score",
+    "latency_ms",
+    "tokens",
+    "tool_calls",
+    "error",
+)
+_MISSING = object()
+
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from evals import gate, report, store  # noqa: E402
+
+_WORK = Path(tempfile.mkdtemp(prefix="teg-checks-"))
+_RES = _WORK / "results"
+_RES.mkdir(parents=True, exist_ok=True)
+store.RESULTS_DIR = _RES  # 本脚本内存里的 report/gate 只认临时结果库
+
+_A1: dict[str, Any] = {}
+
+
+class CheckFailure(AssertionError):
+    """单条检查失败；由 run_all() 汇总成 [FAIL]。"""
+
+
+def _sha16(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _case(
+    case_id: str,
+    score: Any = _MISSING,
+    *,
+    tools: list[str] | None = None,
+    error: str | None = None,
+    latency_ms: int = 1200,
+) -> dict[str, Any]:
+    """造一题 per_case；score=_MISSING 表示故意不写 score 字段。"""
+    item: dict[str, Any] = {
+        "case_id": case_id,
+        "question": f"fixture question {case_id}",
+        "answer_digest": _sha16(case_id),
+        "latency_ms": latency_ms,
+        "tokens": 100,
+        "tool_calls": ["search_knowledge"] if tools is None else list(tools),
+        "error": error,
+    }
+    if score is not _MISSING:
+        item["score"] = score
+    return item
+
+
+def _make_fixture(
+    run_id: str,
+    cases: list[dict[str, Any]],
+    *,
+    root: Path | None = None,
+    valid: bool = True,
+    git_commit: str = "aaaaaaa",
+    dataset_sha: str = "teg-fixture-sha",
+    created_at: str = "2026-11-23T00:00:00",
+) -> Path:
+    """直接写 meta.json + per_case.json：fixture 不经 store.save_run，避免用被测代码造数据。"""
+    scored = sum(1 for item in cases if isinstance(item.get("score"), (int, float)))
+    meta: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "created_at": created_at,
+        "config_id": "FIX",
+        "config_name": "fixture",
+        "model": "fixture-model",
+        "judge_model": "fixture-judge",
+        "n_cases": len(cases),
+        "n_scored": scored,
+        "git_commit": git_commit,
+        "flags": {"ENABLE_TOOL_POLICY": "0", "ENABLE_TRACE": "0", "ENABLE_HITL": "0"},
+        "schema_sha256": "f" * 64,
+        "dataset": "fixture://teg",
+        "dataset_sha256": dataset_sha,
+        "dataset_size": len(cases),
+        "recorded_variance": gate.DEFAULT_RECORDED_VARIANCE,
+        "environment": {
+            "rag_ok": True,
+            "model_ok": True,
+            "pg_ok": True,
+            "redis_ok": True,
+            "checked_at": "2026-11-23T00:00:00",
+        },
+        "valid_for_quality": valid,
+        "invalid_reason": "" if valid else "环境未就绪：rag: fixture 故意标坏",
+    }
+    run_dir = (root or _RES) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (run_dir / "per_case.json").write_text(
+        json.dumps(cases, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return run_dir
+
+
+def _run(
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    timeout: float = 120.0,
+) -> subprocess.CompletedProcess[str]:
+    merged = dict(os.environ)
+    merged.setdefault("PRE_COMMIT_HOME", str(_REPO / ".pre-commit-cache"))
+    if env:
+        merged.update(env)
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=_REPO,
+        env=merged,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _gate_cli(
+    *args: str, results: Path | None = None, timeout: float = 120.0
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        ["-m", "evals.gate", *args],
+        env={"EVAL_RESULTS_DIR": str(results or _RES)},
+        timeout=timeout,
+    )
+
+
+def _run_dir(run_id: str) -> str:
+    return str(_RES / run_id)
+
+
+def _assert(condition: object, message: str) -> None:
+    if not condition:
+        raise CheckFailure(message)
+
+
+def _no_traceback(text: str) -> None:
+    _assert(
+        "Traceback (most recent call last)" not in text, "出现 Python traceback（应给可读错误）"
+    )
+
+
+def _dirs(root: Path) -> set[str]:
+    if not root.is_dir():
+        return set()
+    return {item.name for item in root.iterdir() if item.is_dir() and not item.name.startswith(".")}
+
+
+def _tree_hash(root: Path) -> str:
+    digest = hashlib.sha256()
+    if root.is_dir():
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                digest.update(str(path.relative_to(root)).encode("utf-8"))
+                digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _read_ledger() -> list[dict[str, str]]:
+    """独立按 GB18030 解析台账（不用 evals.backfill 的实现）。"""
+    text = _LEDGER.read_bytes().decode("gb18030")
+    return list(csv.DictReader(io.StringIO(text)))
+
+
+# --------------------------------------------------------------------------- A1
+
+
+def check_a1() -> str:
+    """真跑一次最小评测：三件套 + meta 必填字段齐全且可信。"""
+    before = _dirs(_RESULTS)
+    proc = _run(["-m", "evals.run", "--configs", "A", "--limit", "1"], timeout=900.0)
+    combined = proc.stdout + proc.stderr
+    _no_traceback(combined)
+    _assert(
+        proc.returncode == 0, f"最小评测退出码应为 0，实际 {proc.returncode}：{combined[-500:]}"
+    )
+
+    new = _dirs(_RESULTS) - before
+    _assert(len(new) == 1, f"应新增 1 个 run 目录，实际 {sorted(new)}")
+    run_id = new.pop()
+    run_dir = _RESULTS / run_id
+    for name in ("meta.json", "per_case.json", "report.md"):
+        path = run_dir / name
+        _assert(path.is_file() and path.stat().st_size > 0, f"缺少或空文件：{name}")
+
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    per_case = json.loads((run_dir / "per_case.json").read_text(encoding="utf-8"))
+    missing = [key for key in _META_REQUIRED if key not in meta]
+    _assert(not missing, f"meta 缺字段：{missing}")
+    _assert(meta["run_id"] == run_id, f"meta.run_id={meta['run_id']} 与目录名 {run_id} 不一致")
+    try:
+        time.strptime(str(meta["created_at"]), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        raise CheckFailure(f"created_at 不是可解析时间：{meta['created_at']!r}") from None
+    _assert(meta["config_id"] == "A", f"config_id 应为 A，实际 {meta['config_id']!r}")
+    _assert(str(meta["model"]).strip(), "model 为空")
+    _assert(str(meta["judge_model"]).strip(), "judge_model 为空")
+    _assert(
+        isinstance(meta["n_cases"], int) and meta["n_cases"] == len(per_case) == 1,
+        f"n_cases={meta['n_cases']} 与 per_case={len(per_case)} 不一致（--limit 1 应为 1）",
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    _assert(
+        meta["git_commit"] == head, f"git_commit={meta['git_commit']!r} 与 HEAD {head!r} 不一致"
+    )
+    _assert(
+        isinstance(meta["flags"], dict) and meta["flags"], f"flags 开关快照为空：{meta['flags']!r}"
+    )
+    for key in ("ENABLE_TOOL_POLICY", "ENABLE_TRACE", "ENABLE_HITL", "ENABLE_SKILLS"):
+        _assert(key in meta["flags"], f"flags 缺开关 {key}")
+    _assert(
+        meta["schema_sha256"] == _SCHEMA_SHA, f"schema 指纹不是 c48c9d48…：{meta['schema_sha256']}"
+    )
+    env = meta["environment"]
+    _assert(isinstance(env, dict), f"environment 不是对象：{env!r}")
+    for key in _ENV_KEYS:
+        _assert(key in env, f"environment 缺 {key}")
+    _assert(
+        all(env[key] is True for key in ("rag_ok", "model_ok", "pg_ok", "redis_ok")),
+        f"环境探活并非四项全 ok，但 run 仍记 valid：{env}",
+    )
+    _assert(
+        meta["valid_for_quality"] is True,
+        f"环境全 ok 时 valid_for_quality 应为 true：{meta['valid_for_quality']!r}",
+    )
+
+    report_text = (run_dir / "report.md").read_text(encoding="utf-8")
+    _assert("## 1. 元信息" in report_text, "report.md 缺元信息段")
+    _assert(_SCHEMA_SHA in report_text, "report.md 未记录 schema 指纹")
+    _A1.update(
+        {
+            "run_id": run_id,
+            "meta": meta,
+            "report": report_text,
+            "report_path": run_dir / "report.md",
+        }
+    )
+    return (
+        f"run={run_id}，meta {len(_META_REQUIRED)} 项 + environment {len(_ENV_KEYS)} 项齐全，"
+        f"git={meta['git_commit']}，n_cases=1，valid=true"
+    )
+
+
+# --------------------------------------------------------------------------- A2
+
+
+def check_a2() -> str:
+    """三态：+0.5 -> WARN_IMPROVED(0)、-0.5 -> FAIL_DEGRADED(1)、+0.01 -> PASS(0)。"""
+    cases = [
+        ("teg-up", 0.5, "WARN_IMPROVED", 0),
+        ("teg-down", -0.5, "FAIL_DEGRADED", 1),
+        ("teg-flat", 0.01, "PASS", 0),
+    ]
+    evidence: list[str] = []
+    for run_id, delta, expected, exit_code in cases:
+        proc = _gate_cli(
+            "--baseline", _run_dir("teg-base"), "--candidate", _run_dir(run_id), "--json"
+        )
+        _no_traceback(proc.stdout + proc.stderr)
+        _assert(
+            proc.returncode == exit_code,
+            f"{run_id} 退出码应为 {exit_code}，实际 {proc.returncode}：{proc.stderr[-300:]}",
+        )
+        payload = json.loads(proc.stdout)
+        _assert(
+            payload["status"] == expected,
+            f"{run_id} status 应为 {expected}，实际 {payload['status']}",
+        )
+        _assert(
+            abs(payload["delta"] - delta) < 1e-9,
+            f"{run_id} delta 应为 {delta:+.2f}，实际 {payload['delta']}",
+        )
+        want_passed = expected != "FAIL_DEGRADED"
+        _assert(
+            payload["passed"] is want_passed,
+            f"{run_id} passed={payload['passed']} 与 status={expected} 不一致",
+        )
+        evidence.append(f"{delta:+.2f}->{expected}(exit {exit_code}, passed={payload['passed']})")
+    return "；".join(evidence)
+
+
+# --------------------------------------------------------------------------- A3
+
+
+def check_a3() -> str:
+    """四个边界：方差 0 / 只有 1 题 / 缺 score / 题集完全不一致 —— 可读错误 + 退出码 2。"""
+    scenarios = [
+        (
+            "方差为 0",
+            [
+                "--baseline",
+                _run_dir("teg-base"),
+                "--candidate",
+                _run_dir("teg-up"),
+                "--variance",
+                "0",
+            ],
+            ("输入不合法", "方差"),
+        ),
+        (
+            "只有 1 题",
+            ["--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-single")],
+            ("输入不合法", "共同"),
+        ),
+        (
+            "per_case 缺 score",
+            ["--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-noscore")],
+            ("输入不合法", "score"),
+        ),
+        (
+            "题集完全不一致",
+            ["--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-disjoint")],
+            ("输入不合法", "共同"),
+        ),
+    ]
+    evidence: list[str] = []
+    for name, args, needles in scenarios:
+        proc = _gate_cli(*args)
+        combined = proc.stdout + proc.stderr
+        _no_traceback(combined)
+        _assert(
+            proc.returncode == 2, f"{name} 退出码应为 2，实际 {proc.returncode}：{combined[-300:]}"
+        )
+        for needle in needles:
+            _assert(needle in combined, f"{name} 错误信息缺 {needle!r}：{combined[-300:]}")
+        first = combined.strip().splitlines()[0][:70]
+        evidence.append(f"{name} -> 2（{first}）")
+    return "；".join(evidence)
+
+
+# --------------------------------------------------------------------------- A4
+
+
+def check_a4() -> str:
+    """报告五段齐全；换 fixture 后结论句跟着变（证明不是手写）。"""
+    base = store.load_run("teg-base")
+    down = store.load_run("teg-down")
+    res_down = gate.compare(base, down)
+    text_down = report.write_markdown("teg-down", res_down).read_text(encoding="utf-8")
+
+    for section in (
+        "## 1. 元信息",
+        "## 2. 配置矩阵分数表",
+        "## 3. 与上一次 run 的 diff",
+        "## 4. 结论",
+        "## 5. 失败 case 清单",
+    ):
+        _assert(section in text_down, f"report.md 缺段落：{section}")
+    for header in ("均值", "方差", "样本数"):
+        _assert(header in text_down, f"矩阵表缺列：{header}")
+    _assert("| case | base | cand | diff | 归因 |" in text_down, "缺分题 diff 表头")
+    _assert("| q001 |" in text_down, "分题 diff 未列出 q001")
+    _assert("判据原文" in text_down and gate.CRITERION in text_down, "结论段未引用判据原文")
+    _assert(res_down.reason in text_down, "结论段未使用 gate 生成的结论句")
+    _assert("答案退化" in text_down, "失败清单缺归因分类")
+
+    up = store.load_run("teg-up")
+    res_up = gate.compare(base, up)
+    text_up = report.write_markdown("teg-up", res_up).read_text(encoding="utf-8")
+    _assert(res_down.reason != res_up.reason, "换 fixture 后结论句没变（疑似手写）")
+    _assert(
+        res_down.reason in text_down and res_down.reason not in text_up, "退化结论串到了提升报告"
+    )
+    _assert(res_up.reason in text_up and res_up.reason not in text_down, "提升结论串到了退化报告")
+    return f"五段齐全；{res_down.status} 与 {res_up.status} 结论句各自不同"
+
+
+# --------------------------------------------------------------------------- A5
+
+
+def check_a5() -> str:
+    """valid_for_quality=false：报告顶部警告；并记录 gate 拿它当基线的实际行为。"""
+    base = store.load_run("teg-base")
+    invalid = store.load_run("teg-invalid")
+    res = gate.compare(base, invalid)
+    text = report.write_markdown("teg-invalid", res).read_text(encoding="utf-8")
+    head = "\n".join(text.splitlines()[:6])
+    _assert("链路验证" in head, f"report.md 顶部缺链路验证警告：{head}")
+    _assert("不可用于质量结论" in head, "report.md 顶部缺不可用于质量结论标注")
+
+    proc = _gate_cli("--baseline", _run_dir("teg-invalid"), "--candidate", _run_dir("teg-base"))
+    combined = proc.stdout + proc.stderr
+    hinted = any(
+        word in combined for word in ("链路验证", "valid_for_quality", "不可用于质量结论", "有效性")
+    )
+    behavior = "有提示/拒绝" if hinted else "静默采用（无提示、无拒绝）-> 记 OI-TEG-001"
+    return f"报告顶部有链路验证警告；gate 以无效 run 为基线 exit={proc.returncode}，{behavior}"
+
+
+# --------------------------------------------------------------------------- A6
+
+
+def _dead_port() -> int:
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+    finally:
+        sock.close()
+
+
+def check_a6() -> str:
+    """RAG 指向不存在端口：默认拒绝且不落目录；--allow-degraded 才跑并标 invalid。"""
+    dead = f"http://127.0.0.1:{_dead_port()}"
+    env = {"INGEST_SERVICE_URL": dead}
+
+    before = _dirs(_RESULTS)
+    refuse = _run(["-m", "evals.run", "--configs", "A", "--limit", "1"], env=env, timeout=300.0)
+    combined = refuse.stdout + refuse.stderr
+    _no_traceback(combined)
+    _assert(
+        refuse.returncode == 2, f"探活失败应退出 2，实际 {refuse.returncode}：{combined[-400:]}"
+    )
+    _assert("环境未就绪：rag" in combined, f"缺可读提示 环境未就绪：rag：{combined[-400:]}")
+    after_refuse = _dirs(_RESULTS)
+    _assert(after_refuse == before, f"拒绝开跑却新增了 run 目录：{sorted(after_refuse - before)}")
+
+    before_deg = _dirs(_RESULTS)
+    degraded = _run(
+        ["-m", "evals.run", "--configs", "A", "--set", "smoke", "--limit", "1", "--allow-degraded"],
+        env=env,
+        timeout=600.0,
+    )
+    combined = degraded.stdout + degraded.stderr
+    _no_traceback(combined)
+    _assert(
+        degraded.returncode == 0,
+        f"--allow-degraded 应允许跑完，实际退出 {degraded.returncode}：{combined[-500:]}",
+    )
+    new = _dirs(_RESULTS) - before_deg
+    _assert(len(new) == 1, f"--allow-degraded 应新增 1 个 run，实际 {sorted(new)}")
+    run_id = new.pop()
+    meta = json.loads((_RESULTS / run_id / "meta.json").read_text(encoding="utf-8"))
+    _assert(
+        meta["valid_for_quality"] is False,
+        f"降级 run 的 valid_for_quality 应为 false：{meta['valid_for_quality']!r}",
+    )
+    reason = str(meta.get("invalid_reason") or "")
+    _assert("rag" in reason and "未就绪" in reason, f"invalid_reason 未记录 RAG 原因：{reason!r}")
+    report_text = (_RESULTS / run_id / "report.md").read_text(encoding="utf-8")
+    _assert(
+        "链路验证" in "\n".join(report_text.splitlines()[:6]), "降级 run 报告顶部缺链路验证警告"
+    )
+    return f"拒绝->exit 2 且无新目录；--allow-degraded->run {run_id} valid=false，invalid_reason={reason[:60]}"
+
+
+# --------------------------------------------------------------------------- A7
+
+
+def check_a7() -> str:
+    """backfill：GB18030 解析、候选数=非 pass 行数、带来源 case_id、不改 datasets。"""
+    rows = _read_ledger()
+    _assert(len(rows) > 0, "台账解析出 0 行（GB18030 解析失败？）")
+    _assert(len({len(row) for row in rows}) == 1, "台账列数不一致")
+    non_pass = [row for row in rows if row["status"].strip().lower() != "pass"]
+    _assert(len(rows) >= 200, f"台账行数异常：{len(rows)}")
+
+    ledger_before = hashlib.sha256(_LEDGER.read_bytes()).hexdigest()
+    datasets_before = _tree_hash(_DATASETS)
+    out = _WORK / "candidates.json"
+    proc = _run(
+        ["-m", "evals.backfill", "--ledger", str(_LEDGER), "--out", str(out)], timeout=120.0
+    )
+    combined = proc.stdout + proc.stderr
+    _no_traceback(combined)
+    _assert(
+        proc.returncode == 0, f"backfill 退出码应为 0，实际 {proc.returncode}：{combined[-400:]}"
+    )
+    _assert(out.is_file(), "backfill 未生成候选文件")
+
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    candidates = payload["candidates"]
+    _assert(
+        payload["ledger_rows"] == len(rows), f"ledger_rows={payload['ledger_rows']} != {len(rows)}"
+    )
+    _assert(
+        len(candidates) == len(non_pass),
+        f"候选数 {len(candidates)} 应等于台账非 pass 行数 {len(non_pass)}",
+    )
+    expected_ids = [row["case_id"].strip() for row in non_pass]
+    actual_ids = [item["source_case_id"] for item in candidates]
+    _assert(actual_ids == expected_ids, f"来源 case_id 不一致：{actual_ids} != {expected_ids}")
+    for item in candidates:
+        _assert(
+            item["candidate_id"] == f"REG-{item['source_case_id']}", "candidate_id 未带来源 case_id"
+        )
+        _assert(item["source_status"].lower() != "pass", "候选里混入了 pass 行")
+
+    _assert(
+        hashlib.sha256(_LEDGER.read_bytes()).hexdigest() == ledger_before, "backfill 改动了台账"
+    )
+    _assert(
+        _tree_hash(_DATASETS) == datasets_before, "backfill 自动改动了 datasets（应只写 --out）"
+    )
+    return f"台账 {len(rows)} 行 -> 非 pass {len(non_pass)} 行 -> 候选 {len(candidates)} 条，datasets 未变"
+
+
+# --------------------------------------------------------------------------- A8
+
+
+def check_a8() -> str:
+    """同一对 run 跑两次 gate：退出码、stdout、结论、报告逐字节一致。"""
+    args1 = ("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-down"), "--json")
+    first = _gate_cli(*args1)
+    second = _gate_cli(*args1)
+    _assert(first.returncode == second.returncode, "两次 gate 退出码不同")
+    _assert(first.stdout == second.stdout, "两次 gate stdout 不同")
+    _assert(first.stderr == second.stderr, "两次 gate stderr 不同")
+
+    base = store.load_run("teg-base")
+    down = store.load_run("teg-down")
+    text1 = report.write_markdown("teg-down", gate.compare(base, down)).read_text(encoding="utf-8")
+    text2 = report.write_markdown("teg-down", gate.compare(base, down)).read_text(encoding="utf-8")
+    _assert(text1 == text2, "两次生成的 report.md 不一致")
+    return f"两次 gate 输出一致（exit={first.returncode}），report.md 逐字节一致"
+
+
+# --------------------------------------------------------------------------- B1
+
+
+def check_b1() -> str:
+    """pytest 225 passed；--collect-only 229/233（检查脚本未被收集）。"""
+    proc = _run(["-m", "pytest", "-q"], timeout=900.0)
+    tail = [line for line in proc.stdout.splitlines() if line.strip()][-1]
+    match = re.search(r"(\d+) passed", tail)
+    if match is None:
+        raise CheckFailure(f"pytest 末行无法解析：{tail}")
+    _assert(int(match.group(1)) == 225, f"pytest passed 应为 225，实际 {match.group(1)}：{tail}")
+
+    collect = _run(["-m", "pytest", "--collect-only", "-q"], timeout=300.0)
+    collected = [line for line in collect.stdout.splitlines() if "tests collected" in line]
+    _assert(bool(collected), f"collect-only 输出异常：{collect.stdout[-300:]}")
+    match = re.search(r"(\d+)/(\d+) tests collected", collected[-1])
+    if match is None:
+        raise CheckFailure(f"collect-only 末行无法解析：{collected[-1]}")
+    _assert(
+        (match.group(1), match.group(2)) == ("229", "233"),
+        f"收集数应为 229/233，实际 {match.group(1)}/{match.group(2)}",
+    )
+    return f"pytest: {tail}；collect-only: {match.group(1)}/{match.group(2)}"
+
+
+# --------------------------------------------------------------------------- B2
+
+
+def check_b2() -> str:
+    """schema 指纹 MATCH（c48c9d48…）；import-linter 3 kept。"""
+    schema = _run(["scripts/smoke_tools_schema.py"], timeout=180.0)
+    _no_traceback(schema.stdout + schema.stderr)
+    _assert(schema.returncode == 0, f"schema 脚本退出码 {schema.returncode}")
+    _assert("status: MATCH" in schema.stdout, f"schema 指纹非 MATCH：{schema.stdout[-300:]}")
+    _assert(_SCHEMA_SHA in schema.stdout, "schema 指纹不是 c48c9d48…")
+
+    lint_bin = Path(sys.executable).with_name("lint-imports")
+    command = [str(lint_bin)] if lint_bin.is_file() else ["lint-imports"]
+    lint = subprocess.run(
+        command, cwd=_REPO, capture_output=True, text=True, timeout=300.0, check=False
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", lint.stdout + lint.stderr)
+    _assert(lint.returncode == 0, f"lint-imports 退出码 {lint.returncode}：{plain[-300:]}")
+    _assert("3 kept, 0 broken" in plain, f"import-linter 不是 3 kept：{plain[-300:]}")
+    return f"schema MATCH（{_SCHEMA_SHA[:8]}…）；import-linter 3 kept, 0 broken"
+
+
+# --------------------------------------------------------------------------- B3
+
+
+def _git_diff_quiet(*paths: str) -> bool:
+    proc = subprocess.run(
+        ["git", "diff", "--quiet", "origin/main", "--", *paths],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def check_b3() -> str:
+    """ci.yml 零改动；新增 workflow 只在 workflow_dispatch/schedule 触发。"""
+    _assert(_git_diff_quiet(".github/workflows/ci.yml"), "ci.yml 相对 origin/main 有改动")
+    new_workflow = _REPO / ".github" / "workflows" / "eval-gate.yml"
+    _assert(new_workflow.is_file(), "缺少 eval-gate.yml")
+    import yaml  # 项目已有依赖
+
+    data = yaml.safe_load(new_workflow.read_text(encoding="utf-8")) or {}
+    triggers = data.get("on") or data.get(True) or {}
+    keys = set(triggers) if isinstance(triggers, dict) else {str(triggers)}
+    _assert(
+        keys <= {"workflow_dispatch", "schedule"},
+        f"新增 workflow 触发方式超出允许范围：{sorted(keys)}",
+    )
+    _assert(
+        "workflow_dispatch" in keys and "schedule" in keys,
+        f"新增 workflow 缺触发方式：{sorted(keys)}",
+    )
+    return f"ci.yml 无差异；eval-gate.yml 仅 {sorted(keys)} 触发"
+
+
+# --------------------------------------------------------------------------- B4
+
+
+def check_b4() -> str:
+    """无新增依赖：pyproject.toml / poetry.lock 相对 origin/main 无差异。"""
+    _assert(_git_diff_quiet("pyproject.toml"), "pyproject.toml 有改动（疑似新增依赖）")
+    _assert(_git_diff_quiet("poetry.lock"), "poetry.lock 有改动（疑似新增依赖）")
+    return "pyproject.toml / poetry.lock 均无差异"
+
+
+# --------------------------------------------------------------------------- B5
+
+
+def check_b5() -> str:
+    """无前端产物、无服务启动代码。"""
+    added = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=A", "origin/main"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.splitlines()
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.splitlines()
+    everything = [path for path in (*added, *untracked) if path.strip()]
+    frontend = [
+        path
+        for path in everything
+        if path.lower().endswith((".html", ".vue", ".js", ".ts", ".css"))
+    ]
+    _assert(not frontend, f"新增了前端产物：{frontend[:5]}")
+    servers = []
+    for path in everything:
+        if not path.endswith(".py"):
+            continue
+        text = (_REPO / path).read_text(encoding="utf-8", errors="replace")
+        if "uvicorn.run(" in text or ".listen(" in text:
+            servers.append(path)
+    _assert(not servers, f"新增文件含服务启动代码：{servers}")
+    return f"新增/未跟踪 {len(everything)} 个文件，无前端产物、无服务启动代码"
+
+
+# --------------------------------------------------------------------------- B6
+
+
+def check_b6() -> str:
+    """docs/baseline.md 既有数字未被改动（相对 origin/main 零 diff）。"""
+    baseline = _REPO / "docs" / "baseline.md"
+    _assert(baseline.is_file(), "docs/baseline.md 不存在")
+    _assert(_git_diff_quiet("docs/baseline.md"), "docs/baseline.md 相对 origin/main 有改动")
+    return "docs/baseline.md 零 diff（冻结数字未动）"
+
+
+# --------------------------------------------------------------------------- B7
+
+
+def check_b7() -> str:
+    """台账里没有开发窗口写的 TEG 行：TEG 行只能由 test-TEG 追加。"""
+    rows = _read_ledger()
+    teg = [row for row in rows if row["case_id"].strip().upper().startswith("TEG-")]
+    outsiders = [row["case_id"] for row in teg if row.get("run_by", "").strip() != "test-TEG"]
+    _assert(not outsiders, f"发现非 test-TEG 写的 TEG 行：{outsiders}")
+    return f"TEG 行 {len(teg)} 条，全部 run_by=test-TEG"
+
+
+# --------------------------------------------------------------------------- C1
+
+
+def check_c1() -> str:
+    """题集不一致：gate 是否指出缺哪一题。"""
+    base = store.load_run("teg-base")
+    partial = store.load_run("teg-partial")
+    res = gate.compare(base, partial)
+    by_id = {item.case_id: item for item in res.evidence}
+    missing = by_id.get("q003")
+    extra = by_id.get("q004")
+    proc = _gate_cli("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-partial"))
+    shown = "q003" in proc.stdout and "缺少" in proc.stdout
+    named = bool(missing and missing.attribution) and shown
+    extra_marked = bool(extra and extra.attribution)
+    detail = (
+        f"候选缺 q003：{'已指出' if named else '未指出'}；"
+        f"候选多出 q004：{'已标记' if extra_marked else '未标记（归因空，CLI 不打印）'}"
+    )
+    if not (named and extra_marked):
+        detail += " -> 记 OI-TEG-002"
+    return detail
+
+
+# --------------------------------------------------------------------------- C2
+
+
+def check_c2() -> str:
+    """分数全同（delta=0）：是否 PASS 并说明无差异。"""
+    base = store.load_run("teg-base")
+    same = store.load_run("teg-same")
+    res = gate.compare(base, same)
+    _assert(res.status == "PASS", f"全同分数应为 PASS，实际 {res.status}")
+    _assert(res.delta == 0, f"全同分数 delta 应为 0，实际 {res.delta}")
+    says_no_diff = (
+        "无差异" in res.reason
+        or "无差异"
+        in _gate_cli("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-same")).stdout
+    )
+    suffix = "" if says_no_diff else " -> 未直说'无差异'，记 OI-TEG-003"
+    return f"PASS，delta=0.0000，reason={res.reason!r}{suffix}"
+
+
+# --------------------------------------------------------------------------- C3
+
+
+def check_c3() -> str:
+    """失败 case 超 10 条：report 是否截断并说明。"""
+    base = store.load_run("teg-twelve-base")
+    cand = store.load_run("teg-twelve-cand")
+    res = gate.compare(base, cand)
+    _assert(len(res.failures) == 12, f"应造出 12 条失败，实际 {len(res.failures)}")
+    text = report.write_markdown("teg-twelve-cand", res).read_text(encoding="utf-8")
+    failures_part = text.split("## 5.", 1)[1] if "## 5." in text else ""
+    rows = [
+        line for line in failures_part.splitlines() if line.startswith("| q") and "答案退化" in line
+    ]
+    truncated = "另有 2 条失败未列出" in text
+    _assert(len(rows) <= 10, f"失败清单应最多 10 条，实际 {len(rows)}")
+    _assert(truncated, "失败清单超过 10 条时未说明截断")
+    return f"{len(res.failures)} 条失败 -> 列出 {len(rows)} 条，注明另有 2 条未列出"
+
+
+# --------------------------------------------------------------------------- C4
+
+
+def check_c4() -> str:
+    """--limit 1 的 meta / report 是否标注非全量、结论不可用于发布。"""
+    meta = _A1.get("meta") or {}
+    text = _A1.get("report") or ""
+    _assert(bool(meta), "A1 未产出 meta，无法观察 --limit 1")
+    blob = json.dumps(meta, ensure_ascii=False) + text
+    markers = [word for word in ("非全量", "不可用于发布", "样本不全", "抽样") if word in blob]
+    partial_marked = meta.get("dataset_size") == 20 and meta.get("n_cases") == 1
+    _assert(
+        partial_marked, f"预期 A1 为 20 题里跑 1 题，实际 dataset_size={meta.get('dataset_size')}"
+    )
+    suffix = (
+        ""
+        if markers
+        else " -> 有 dataset_size/n_cases 但无'非全量/不可用于发布'字样，记 OI-TEG-004"
+    )
+    return f"dataset_size=20、n_cases=1；标注字段={markers or '无'}{suffix}"
+
+
+# --------------------------------------------------------------------------- C5
+
+
+def check_c5() -> str:
+    """两次 run 的 git 哈希不同：gate 是否提示代码版本已变。"""
+    base = store.load_run("teg-base")
+    drift = store.load_run("teg-git-drift")
+    proc = _gate_cli("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-git-drift"))
+    combined = proc.stdout + proc.stderr
+    res = gate.compare(base, drift)
+    hinted = any(word in combined for word in ("代码版本", "git_commit", "版本已变", "commit"))
+    suffix = "" if hinted else " -> 无任何版本提示，结论仍照常给出，记 OI-TEG-005"
+    return f"baseline git=aaaaaaa，candidate git=bbbbbbb；gate 结论={res.status}，版本提示={'有' if hinted else '无'}{suffix}"
+
+
+# --------------------------------------------------------------------------- C6
+
+
+def check_c6() -> str:
+    """results 下 ci-smoke/ 这类子目录：latest_run() 不应误选。"""
+    root = _WORK / "c6-results"
+    _make_fixture(
+        "20261123-100000-direct", [_case("q001", 9)], root=root, created_at="2026-11-23T10:00:00"
+    )
+    nested = root / "ci-smoke"
+    _make_fixture(
+        "20261123-120000-nested",
+        [_case("q001", 9)],
+        root=nested,
+        created_at="2026-11-23T12:00:00",
+    )
+    (nested / "20261123-130000-broken").mkdir(parents=True, exist_ok=True)
+    (nested / "20261123-130000-broken" / "meta.json").write_text("{}", encoding="utf-8")
+
+    saved = store.RESULTS_DIR
+    store.RESULTS_DIR = root
+    try:
+        runs = store.list_runs()
+        latest = store.latest_run()
+    finally:
+        store.RESULTS_DIR = saved
+    if latest is None:
+        raise CheckFailure("latest_run 返回 None")
+    _assert(
+        latest.run_id == "20261123-100000-direct",
+        f"latest_run 误选了子目录/坏目录：{latest.run_id}",
+    )
+    _assert(
+        len(runs) == 1,
+        f"list_runs 应只认直接子目录里带 meta.json 的 run，实际 {[run.run_id for run in runs]}",
+    )
+    return f"latest_run -> {latest.run_id}（ci-smoke 子目录未被误选），list_runs=1"
+
+
+# --------------------------------------------------------------------------- 主流程
+
+
+CHECKS: list[tuple[str, Any]] = [
+    ("A1 run/store 落库三件套 + meta 完整性", check_a1),
+    ("A2 gate 三态 + passed 与 status 一致", check_a2),
+    ("A3 gate 四个边界可读错误 + 退出码 2", check_a3),
+    ("A4 report 五段 + 结论句随 fixture 变化", check_a4),
+    ("A5 链路验证标记 + gate 基线行为记录", check_a5),
+    ("A6 探活拒绝不落目录 + --allow-degraded 标 invalid", check_a6),
+    ("A7 backfill GB18030/候选数/来源/不动 datasets", check_a7),
+    ("A8 gate 幂等", check_a8),
+    ("B1 pytest 225 + collect-only 229/233", check_b1),
+    ("B2 schema MATCH + lint-imports 3 kept", check_b2),
+    ("B3 ci.yml 零改动 + 新 workflow 仅手动/定时", check_b3),
+    ("B4 无新增依赖", check_b4),
+    ("B5 无前端产物/无服务启动代码", check_b5),
+    ("B6 docs/baseline.md 数字未动", check_b6),
+    ("B7 台账无开发窗口写的 TEG 行", check_b7),
+    ("C1 观察：题集不一致是否指出缺题", check_c1),
+    ("C2 观察：分数全同是否 PASS 且说明无差异", check_c2),
+    ("C3 观察：失败 case 超 10 条是否截断", check_c3),
+    ("C4 观察：--limit 1 是否标注非全量", check_c4),
+    ("C5 观察：git 哈希不同是否提示版本变化", check_c5),
+    ("C6 观察：ci-smoke 子目录是否被 latest_run 误选", check_c6),
+]
+
+
+def _build_fixtures() -> None:
+    base_scores = [9, 8, 9]
+    _make_fixture(
+        "teg-base", [_case(f"q{index:03d}", score) for index, score in enumerate(base_scores, 1)]
+    )
+    _make_fixture(
+        "teg-up",
+        [_case(f"q{index:03d}", score + 0.5) for index, score in enumerate(base_scores, 1)],
+    )
+    _make_fixture(
+        "teg-down",
+        [_case(f"q{index:03d}", score - 0.5) for index, score in enumerate(base_scores, 1)],
+    )
+    _make_fixture(
+        "teg-flat",
+        [_case(f"q{index:03d}", score + 0.01) for index, score in enumerate(base_scores, 1)],
+    )
+    _make_fixture(
+        "teg-same", [_case(f"q{index:03d}", score) for index, score in enumerate(base_scores, 1)]
+    )
+    _make_fixture(
+        "teg-invalid",
+        [_case(f"q{index:03d}", score) for index, score in enumerate(base_scores, 1)],
+        valid=False,
+    )
+    _make_fixture("teg-single", [_case("q001", 9)])
+    _make_fixture("teg-noscore", [_case("q001", _MISSING), _case("q002", 8)])
+    _make_fixture(
+        "teg-disjoint",
+        [_case(f"q{index:03d}", score) for index, score in enumerate(base_scores, 101)],
+    )
+    _make_fixture("teg-partial", [_case("q001", 9), _case("q002", 8), _case("q004", 9)])
+    _make_fixture(
+        "teg-git-drift",
+        [_case(f"q{index:03d}", score) for index, score in enumerate(base_scores, 1)],
+        git_commit="bbbbbbb",
+    )
+    _make_fixture("teg-twelve-base", [_case(f"q{index:03d}", 9) for index in range(1, 13)])
+    _make_fixture(
+        "teg-twelve-cand",
+        [_case(f"q{index:03d}", 5) for index in range(1, 13)],
+        created_at="2026-11-23T00:01:00",
+    )
+
+
+def main() -> int:
+    print(f"临时结果库：{_RES}")
+    print(f"仓库：{_REPO}")
+    _build_fixtures()
+    failures = 0
+    for name, check in CHECKS:
+        started = time.time()
+        try:
+            detail = check()
+        except Exception as exc:  # noqa: BLE001 - 汇总所有失败，不中断后续检查
+            failures += 1
+            print(f"[FAIL] {name} — {type(exc).__name__}: {exc}")
+        else:
+            print(f"[PASS] {name} — {detail}（{time.time() - started:.1f}s）")
+
+    total = len(CHECKS)
+    print(f"RESULT: {total - failures} passed, {failures} failed")
+    print(f"临时目录：{_WORK}（保留供复核，可手动删除）")
+    return 0 if failures == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
