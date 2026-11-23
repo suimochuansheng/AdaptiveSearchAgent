@@ -1,0 +1,40 @@
+# 轻量评测门禁 —— 离线自测（不跑真实评测）
+#
+# 为什么 CI 不跑真实评测：CI 没有 Ollama / RAG 网关 / 裁判 API 凭据，
+# 真跑会红且不可复现。本 workflow 只验证门禁逻辑本身（fixture 数据），
+# 真实评测在本地或发版时用 `python -m evals.run` 跑。
+name: Eval Gate
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周一 02:00 UTC
+    - cron: "0 2 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  offline-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry (2.x)
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 - --version 2.4.1
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Install dependencies
+        run: poetry install --with dev --no-interaction
+      - name: Offline eval gate smoke
+        run: poetry run python scripts/smoke_eval_gate.py --results-dir evals/results/ci-smoke
+      - name: Upload markdown reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-gate-reports
+          path: evals/results/**/report.md
+          if-no-files-found: error

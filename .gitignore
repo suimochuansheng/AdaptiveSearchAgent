@@ -46,6 +46,8 @@ frontend/.env
 # Logs & data
 logs/
 data/
+# 评测产物：evals/run.py 落库到 evals/results/<run_id>/，不进 git
+evals/results/
 *.log
 metrics.json
 

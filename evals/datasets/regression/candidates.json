@@ -1,0 +1,73 @@
+{
+  "generated_at": "2026-11-23T22:29:50",
+  "ledger": "tests/test_agent_cases/台账用例.csv",
+  "ledger_rows": 271,
+  "non_pass_rows": 4,
+  "count": 4,
+  "candidates": [
+    {
+      "candidate_id": "REG-T02-005",
+      "source_case_id": "T02-005",
+      "source_status": "block",
+      "source_module": "eval",
+      "source_level": "functional",
+      "source_priority": "P0",
+      "question": "『记录方差』判据是否独立于本次数据",
+      "ground_truth": "定义独立于本次数据（否则记 open_issue，不判 FAIL）",
+      "steps": "查 第 4 节 对『记录方差』的定义来源，判断是否取自被检验的同两次实测",
+      "observed": "docs/baseline.md 第 108 行：记录方差取三项里最大的实测差 = 0.0408；计划窗口裁定：A2 形式通过；判据独立性须在 G11 前修",
+      "open_issue": "OI-T02-001 记录方差 0.0408 即本次两次实测差（faith），阈值与检验数据同源，属自证循环；A2 按形式通过处理，但『判据有效』不成立",
+      "ledger": "tests/test_agent_cases/台账用例.csv",
+      "review": "pending",
+      "note": "候选模板；需人工确认后转成 YAML 加入黄金集/回归集，本脚本不自动入集"
+    },
+    {
+      "candidate_id": "REG-INT-015",
+      "source_case_id": "INT-015",
+      "source_status": "block",
+      "source_module": "integration",
+      "source_level": "E2E",
+      "source_priority": "P0",
+      "question": "G1 拒绝场景：span 条数与工具真实执行的差值留档",
+      "ground_truth": "请求 1 次；tool span 1 条；实际执行 0 次；账本 calls=0；span 与执行差 1",
+      "steps": "G1 组：跑一轮被拒绝的假图会话；统计 tool 请求数、tool span 条数、实际执行数、账本 calls",
+      "observed": "INT2-G1 取证完成；span-执行差 delta=1；请求-span 差 0；拒绝 span 无 error_kind",
+      "open_issue": "OI-INT-002 拒绝场景多出 1 条 tool span 且无拒绝标记，追踪无法区分被拒绝与正常执行",
+      "ledger": "tests/test_agent_cases/台账用例.csv",
+      "review": "pending",
+      "note": "候选模板；需人工确认后转成 YAML 加入黄金集/回归集，本脚本不自动入集"
+    },
+    {
+      "candidate_id": "REG-INT-016",
+      "source_case_id": "INT-016",
+      "source_status": "block",
+      "source_module": "integration",
+      "source_level": "E2E",
+      "source_priority": "P1",
+      "question": "G2 lint-imports 的 adapters-only-ports 忽略项告警仍在",
+      "ground_truth": "3 kept, 0 broken；adapters-only-ports 仍报 1 条忽略项无匹配告警",
+      "steps": "运行 poetry run lint-imports；检查 No matches for ignored import 告警",
+      "observed": "Contracts: 3 kept, 0 broken；warning 1 条（适配器尚未 import ports）",
+      "open_issue": "OI-INT-003 adapters-only-ports 忽略项 agent.adapters.** -> agent.app.ports 无匹配，待适配器导入端口后消除",
+      "ledger": "tests/test_agent_cases/台账用例.csv",
+      "review": "pending",
+      "note": "候选模板；需人工确认后转成 YAML 加入黄金集/回归集，本脚本不自动入集"
+    },
+    {
+      "candidate_id": "REG-UI-005",
+      "source_case_id": "UI-005",
+      "source_status": "block",
+      "source_module": "integration",
+      "source_level": "UI",
+      "source_priority": "P1",
+      "question": "停 MCP 后界面可读提示",
+      "ground_truth": "有可读降级提示且不崩",
+      "steps": "问字符数；看界面是否有不可用提示",
+      "observed": "screenshots/UI-05-mcp-degraded.png；未崩，模型静默手算，无显式提示；计划窗口裁定：P1 处理，不阻断 P0 收口",
+      "open_issue": "OI-UI-002 降级未在界面显式提示（仅思考过程显示工具名）；建议工具不可用时补一条可读提示",
+      "ledger": "tests/test_agent_cases/台账用例.csv",
+      "review": "pending",
+      "note": "候选模板；需人工确认后转成 YAML 加入黄金集/回归集，本脚本不自动入集"
+    }
+  ]
+}
