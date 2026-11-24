@@ -3,7 +3,7 @@
 
 卡号：TEG「轻量评测门禁」（补丁基线 83bf142：三态判据 + 评测前探活 + 有效性标记）
 目的：自己构造 fixture，逐条验收 A1~A13（功能有效性 + 判据修正）、
-      B1~B10（不变量 + 措辞一致性）、C1~C10（守卫断言 + 边界观察，观察项只记 open_issue）。
+      B1~B11（不变量 + 措辞一致性）、C1~C10（守卫断言 + 边界观察）。
 运行：poetry run python "tests/test_agent_cases/TEG-评测门禁/teg_checks.py"
       （cwd 任意；脚本自己定位仓库根）
 数据与编码：fixture 全部写 tempfile；A1/A6 会真跑一次最小评测（--limit 1），
@@ -414,12 +414,12 @@ def check_a4() -> str:
         "## 2. 配置矩阵分数表",
         "## 3. 与上一次 run 的 diff",
         "## 4. 结论",
-        "## 5. 失败 case 清单",
+        "## 5. 失败归因 case 清单",
     ):
         _assert(section in text_down, f"report.md 缺段落：{section}")
     for header in ("均值", "方差", "样本数"):
         _assert(header in text_down, f"矩阵表缺列：{header}")
-    _assert("| case | base | cand | diff | 归因 |" in text_down, "缺分题 diff 表头")
+    _assert("| case | base | cand | diff | 失败归因 |" in text_down, "缺分题 diff 表头")
     _assert("| q001 |" in text_down, "分题 diff 未列出 q001")
     _assert("判据原文" in text_down and gate.CRITERION in text_down, "结论段未引用判据原文")
     _assert(res_down.reason in text_down, "结论段未使用 gate 生成的结论句")
@@ -701,11 +701,12 @@ def check_a12() -> str:
         f"实测方差应为 0.5（auto-a 9.0 vs auto-b 8.5），实际 {payload_hit['recorded_variance']}",
     )
 
+    # 未命中案例必须同数据集（否则会先被 dataset 守卫拒绝，测不到回退分支）
     miss = _gate_cli(
         "--baseline",
         _run_dir("teg-unique-sha"),
         "--candidate",
-        _run_dir("teg-n20-d1"),
+        _run_dir("teg-unique-sha"),
         "--variance",
         "auto",
         "--json",
@@ -883,11 +884,24 @@ def check_b5() -> str:
 
 
 def check_b6() -> str:
-    """docs/baseline.md 既有数字未被改动（相对 origin/main 零 diff）。"""
+    """docs/baseline.md 既有数字未被改动：相对 origin/main 只许追加，不许删除/改写。"""
     baseline = _REPO / "docs" / "baseline.md"
     _assert(baseline.is_file(), "docs/baseline.md 不存在")
-    _assert(_git_diff_quiet("docs/baseline.md"), "docs/baseline.md 相对 origin/main 有改动")
-    return "docs/baseline.md 零 diff（冻结数字未动）"
+    numstat = subprocess.run(
+        ["git", "diff", "--numstat", "origin/main", "--", "docs/baseline.md"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    if not numstat:
+        return "docs/baseline.md 零 diff（冻结数字未动）"
+    parts = numstat.split("\t")
+    _assert(len(parts) >= 2, f"numstat 输出无法解析：{numstat!r}")
+    added, deleted = parts[0], parts[1]
+    _assert(deleted == "0", f"docs/baseline.md 有 {deleted} 行删除/改写（既有数字被改动）")
+    _assert(int(added) > 0, f"numstat 新增行数异常：{numstat!r}")
+    return f"docs/baseline.md 仅追加 {added} 行、0 行删除（既有数字未动）"
 
 
 # --------------------------------------------------------------------------- B7
@@ -960,6 +974,32 @@ def check_b10() -> str:
         _assert("符号检验" in proc.stdout, f"{name} 输出缺「符号检验」：{proc.stdout[-300:]}")
         _assert("题当量" in proc.stdout, f"{name} 输出缺「题当量」：{proc.stdout[-300:]}")
     return "两条命令（显式 --baseline/--candidate 与 --compare last）均同时输出符号检验与题当量"
+
+
+# --------------------------------------------------------------------------- B11
+
+
+def check_b11() -> str:
+    """三态措辞真实复算：-0.05 / 0 / -0.15 各跑一次。"""
+    within = _gate_cli(
+        "--baseline", _run_dir("teg-n20-base"), "--candidate", _run_dir("teg-n20-d1")
+    )
+    out_within = within.stdout
+    _assert(within.returncode == 0, f"delta=-0.05 应 exit 0，实际 {within.returncode}")
+    _assert("差异在单题当量内" in out_within, f"缺「差异在单题当量内」：{out_within[-300:]}")
+    _assert("失败归因" not in out_within, f"delta=-0.05 不应出现「失败归因」：{out_within[-300:]}")
+    _assert("无漂移" not in out_within, f"delta=-0.05 不应出现「无漂移」：{out_within[-300:]}")
+
+    zero = _gate_cli("--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-same"))
+    _assert("无差异" in zero.stdout, f"delta=0 缺「无差异」：{zero.stdout[-300:]}")
+
+    degraded = _gate_cli(
+        "--baseline", _run_dir("teg-n20-base"), "--candidate", _run_dir("teg-n20-d3")
+    )
+    _assert(degraded.returncode == 1, f"delta=-0.15 应 exit 1，实际 {degraded.returncode}")
+    _assert("退化超出阈值" in degraded.stdout, f"缺「退化超出阈值」：{degraded.stdout[-300:]}")
+    _assert("失败归因" in degraded.stdout, f"delta=-0.15 缺「失败归因」：{degraded.stdout[-300:]}")
+    return "delta=-0.05：差异在单题当量内且无失败归因/无漂移；delta=0：无差异；delta=-0.15：退化超出阈值+失败归因"
 
 
 # --------------------------------------------------------------------------- C1
@@ -1163,24 +1203,29 @@ def check_c7() -> str:
 
 
 def check_c8() -> str:
-    """观察：n_cases=2 时单题当量 0.5，几乎必然 PASS，是否提示样本过小。"""
+    """OI-TEG-006：n<5 -> sample_warning 非空 + 报告顶部提示，且不阻断状态。"""
     res = gate.compare(store.load_run("teg-n2-base"), store.load_run("teg-n2-cand"))
     _assert(res.n_cases == 2, f"n_cases 应为 2，实际 {res.n_cases}")
-    _assert(
-        abs(res.one_case_weight - 0.5) < 1e-9,
-        f"n=2 单题当量应为 0.5，实际 {res.one_case_weight}",
-    )
-    _assert(res.status == "PASS", f"delta=-0.5 仍应为 PASS，实际 {res.status}")
-    hints = [w for w in ("样本过小", "判别力", "题数过少") if w in res.reason]
-    suffix = "" if hints else " -> 未提示样本过小/判据无判别力，记 OI-TEG-006"
-    return f"n=2 当量 0.5，delta=-0.5 仍 PASS；提示={hints or '无'}{suffix}"
+    warning = res.sample_warning or ""
+    _assert(bool(warning.strip()), "n=2 时 sample_warning 为空")
+    _assert("样本过小" in warning and "判别力" in warning, f"sample_warning 措辞不对：{warning!r}")
+    _assert("样本过小" in res.reason, f"reason 未带样本警告：{res.reason}")
+
+    cli = _gate_cli("--baseline", _run_dir("teg-n2-base"), "--candidate", _run_dir("teg-n2-cand"))
+    _assert(cli.returncode == 0, f"样本过小不应阻断（应仍 exit 0），实际 {cli.returncode}")
+    _assert("样本警告" in cli.stdout, f"CLI 未打印样本警告：{cli.stdout[-300:]}")
+
+    text = report.write_markdown("teg-n2-cand", res).read_text(encoding="utf-8")
+    head = "\n".join(text.splitlines()[:8])
+    _assert("样本过小" in head, f"report 顶部缺样本过小提示：{head}")
+    return f"sample_warning={warning}；exit=0 不阻断；report 顶部有提示"
 
 
 # --------------------------------------------------------------------------- C9
 
 
 def check_c9() -> str:
-    """观察：非整数分数（0~1）时 score_step 如何推断，是否写进 reason。"""
+    """OI-TEG-009：非整数分数的 score_step 与 n 必须写进 reason。"""
     payload = json.loads(
         _gate_cli(
             "--baseline",
@@ -1190,29 +1235,51 @@ def check_c9() -> str:
             "--json",
         ).stdout
     )
-    step = float(payload["score_step"])
-    _assert(abs(step - 0.1) < 1e-9, f"0~1 分数应推出 step=0.1，实际 {step}")
-    in_reason = ("步长" in payload["reason"]) or ("score_step" in payload["reason"])
-    suffix = "" if in_reason else " -> score_step 未写进 reason（只写单题当量），记 OI-TEG-009"
-    return (
-        f"score_step={step}（由最小非零分数差推出），"
-        f"one_case_weight={payload['one_case_weight']}{suffix}"
-    )
+    reason = str(payload["reason"])
+    _assert("score_step=0.1" in reason, f"reason 未写 score_step=0.1：{reason}")
+    _assert("n=20" in reason, f"reason 未写 n=20：{reason}")
+    return f"score_step={payload['score_step']}、n={payload['n_cases']} 均已写入 reason"
 
 
 # --------------------------------------------------------------------------- C10
 
 
 def check_c10() -> str:
-    """观察：两次 run 数据集 sha256 不同时的行为。"""
-    proc = _gate_cli(
+    """OI-TEG-010：数据集 sha256 不同默认 exit 2；放行后 dataset_mismatch=true 且报告单独一行。"""
+    refused = _gate_cli(
         "--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-other-dataset")
     )
-    combined = proc.stdout + proc.stderr
+    combined = refused.stdout + refused.stderr
     _no_traceback(combined)
-    silent = proc.returncode in (0, 1) and "数据集" not in combined
-    suffix = " -> 直接对比不校验 dataset_sha256（静默按均值比较），记 OI-TEG-010" if silent else ""
-    return f"sha 不同时 exit={proc.returncode}，输出{'未' if silent else '已'}提及数据集{suffix}"
+    _assert(refused.returncode == 2, f"数据集不同默认应 exit 2，实际 {refused.returncode}")
+    _assert("数据集不同" in combined, f"拒绝原因缺「数据集不同」：{combined[-300:]}")
+    _assert("不可直接比较" in combined, f"拒绝原因缺「不可直接比较」：{combined[-300:]}")
+
+    allowed = _gate_cli(
+        "--baseline",
+        _run_dir("teg-base"),
+        "--candidate",
+        _run_dir("teg-other-dataset"),
+        "--allow-mixed-dataset",
+        "--json",
+    )
+    _assert(allowed.returncode in (0, 1), f"放行后退出码异常：{allowed.returncode}")
+    payload = json.loads(allowed.stdout)
+    _assert(payload["dataset_mismatch"] is True, "放行后 dataset_mismatch 应为 true")
+
+    res = gate.compare(
+        store.load_run("teg-base"),
+        store.load_run("teg-other-dataset"),
+        allow_mixed_dataset=True,
+    )
+    text = report.write_markdown("teg-other-dataset", res).read_text(encoding="utf-8")
+    mismatch_lines = [line for line in text.splitlines() if "数据集不同" in line]
+    _assert(bool(mismatch_lines), "report 缺「数据集不同」警告")
+    _assert(
+        any(line.startswith("> ⚠️") for line in mismatch_lines),
+        f"「数据集不同」未作为独立警告行：{mismatch_lines}",
+    )
+    return "默认 exit 2；--allow-mixed-dataset 后 dataset_mismatch=true，报告有单独警告行"
 
 
 # --------------------------------------------------------------------------- 主流程
@@ -1242,6 +1309,7 @@ CHECKS: list[tuple[str, Any]] = [
     ("B8 PASS 时不得写「失败归因」（应写「变化归因」）", check_b8),
     ("B9 非零差值小于阈值不得写「无漂移」", check_b9),
     ("B10 两条真实命令同时输出符号检验与题当量", check_b10),
+    ("B11 三态措辞：-0.05 / 0 / -0.15 各跑一次", check_b11),
     ("C1 无效基线默认拒绝 + 放行记 quality_warning", check_c1),
     ("C2 题集不一致默认拒绝 + --allow-partial 标记", check_c2),
     ("C3 零差值 reason 含「无差异」", check_c3),
@@ -1249,9 +1317,9 @@ CHECKS: list[tuple[str, Any]] = [
     ("C5 git 版本不同 code_version_changed + 报告提示", check_c5),
     ("C6 观察：失败 case 超 10 条是否截断", check_c6),
     ("C7 观察：ci-smoke 子目录是否被 latest_run 误选", check_c7),
-    ("C8 观察：n=2 当量 0.5 是否提示样本过小", check_c8),
-    ("C9 观察：非整数分数的 score_step 推断与措辞", check_c9),
-    ("C10 观察：数据集 sha256 不同时的行为", check_c10),
+    ("C8 守卫：n<5 样本警告且不阻断（OI-006）", check_c8),
+    ("C9 守卫：reason 含 score_step= 与 n=（OI-009）", check_c9),
+    ("C10 守卫：数据集不同默认拒绝/放行标记（OI-010）", check_c10),
 ]
 
 
