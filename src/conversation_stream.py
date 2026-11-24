@@ -13,6 +13,10 @@
   载荷与判定见 `agent/adapters/api/hitl.py`）。出现该帧后本轮不发 `final`，等 `/resume`
   续跑；开关关闭 / 无中断时帧序列与改造前逐帧一致。
 
+**终止 vs 挂起**（reject 分档语义 v2，2026-11-24）：`dangerous` 级工具被拒后图直接 END，
+本轮**终止**——此时必须显式推一条 `final`（`已拒绝执行 {tool}，本轮未产生内容`）且全程零
+`token`；"interrupt 过不发 final" 只对**挂起态**成立。低风险工具被拒仍回灌继续。
+
 只转发 `langgraph_node == "agent"` 的 chunk，因此 `deep_research` 内部那张 workflow
 子图（planner/writer 等节点）的模型输出不会污染外层会话的 token 流。
 """
@@ -169,6 +173,19 @@ async def _stop_producer(producer: asyncio.Task[None]) -> None:
         await producer
 
 
+def _rejected_dangerous_tool(final_state: dict[str, Any]) -> str | None:
+    """本轮是否因「拒绝 dangerous 工具」而终止；是则返回工具名。
+
+    判据与条件边共用（`src/conversation_graph.rejected_dangerous_tool_name`），
+    不在这里另写一套：两处口径一旦漂移，就会出现"图已经 END、流还在等 token"。
+    """
+    if not final_state:
+        return None
+    from src.conversation_graph import rejected_dangerous_tool_name
+
+    return rejected_dangerous_tool_name(final_state)  # type: ignore[arg-type]
+
+
 async def stream_conversation(  # noqa: C901 - 帧循环本身是状态机，拆开反而难读
     graph: Any,
     inputs: dict[str, Any],
@@ -262,10 +279,19 @@ async def stream_conversation(  # noqa: C901 - 帧循环本身是状态机，拆
         await _stop_producer(producer)
 
     if interrupted:
-        # 本轮已挂起等人工审批：不发 final（恢复后由 /resume 继续吐后续帧）
+        # 本轮已挂起等人工审批：不发 final（恢复后由 /resume 继续吐后续帧）。
+        # 这条规则只对"挂起态"成立——本轮**终止**（reject 分档语义 v2）必须发 final。
         return
 
     final_state = snapshot["final"] or {}
+    rejected_tool = _rejected_dangerous_tool(final_state)
+    if rejected_tool is not None:
+        # reject 分档语义 v2：dangerous 工具被拒 -> 图在 tools 之后直接 END，
+        # agent 节点不会再跑，所以本分支天然零 token；这里显式补一条可读 final，
+        # 内容不得包含任何调研结论（本轮确实没产生内容）。
+        yield _sse({"type": "final", "content": f"已拒绝执行 {rejected_tool}，本轮未产生内容"})
+        return
+
     messages = final_state.get("messages") or []
     # 优先用最终快照里的完整回答；快照缺失时退回已推送的 token 拼接
     answer = str(messages[-1].content) if messages else "".join(answer_parts)

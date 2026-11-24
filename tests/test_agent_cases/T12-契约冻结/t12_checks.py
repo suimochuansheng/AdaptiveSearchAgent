@@ -354,7 +354,12 @@ def check_resume_http() -> str:
 
 
 def check_no_token_in_contract_body() -> str:
-    """`approval.md` / `resume-http.md` 契约正文无第二凭证字段；历史段须记录删除。"""
+    """`approval.md` / `resume-http.md` 契约正文无第二凭证字段；历史段须记录删除。
+
+    v2 补充（2026-11-24，reject 分档语义）：§2.1 要用 SSE 的 `token` **帧**描述"终止分支
+    零增量文本"，这不是第二凭证字段。判据收敛为：**只豁免同时谈到"帧"的行**，其余出现
+    `token` 的行照旧算违规；凭证层面的三重断言（字段名 / resume body 键 / 冻结常量）不变。
+    """
     import agent.domain.roles as roles
     import agent.domain.tool as tool
 
@@ -365,7 +370,7 @@ def check_no_token_in_contract_body() -> str:
         hits = [
             f"L{i}: {line.strip()}"
             for i, line in enumerate(body.splitlines(), 1)
-            if TOKEN_WORD.search(line)
+            if TOKEN_WORD.search(line) and "帧" not in line
         ]
         assert not hits, f"{name} 契约正文出现第二凭证字段: {hits}"
         assert "删除" in history and "2026-11-11" in history, f"{name} 历史段未记录删除裁决"

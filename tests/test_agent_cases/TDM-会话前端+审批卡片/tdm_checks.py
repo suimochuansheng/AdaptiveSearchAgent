@@ -121,6 +121,8 @@ class FakeResponse:
     def __init__(self, lines: list[str], status_code: int = 200) -> None:
         self._lines = lines
         self.status_code = status_code
+        # 被消费过的行（reject 分档语义 v2：据此核对拒绝流"恰好 1 条 final、0 条 token"）
+        self.consumed: list[str] = []
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -132,6 +134,7 @@ class FakeResponse:
 
     async def aiter_lines(self):
         for line in self._lines:
+            self.consumed.append(line)
             yield line
 
     async def __aenter__(self) -> FakeResponse:
@@ -160,6 +163,7 @@ class FakeClient:
     def __init__(self, responses: list[FakeResponse] | None = None) -> None:
         self.calls: list[dict] = []
         self.responses = list(responses or [])
+        self.last_response: FakeResponse | None = None
 
     def stream(self, method: str, url: str, json: dict | None = None) -> FakeResponse:
         self.calls.append({"method": method, "url": url, "json": json})
@@ -184,7 +188,8 @@ class FakeAsyncClient(FakeClient):
     def stream(self, method: str, url: str, json: dict | None = None) -> FakeResponse:
         self.calls.append({"method": method, "url": url, "json": json})
         assert FakeAsyncClient.responses, f"没有预置响应了: {method} {url}"
-        return FakeAsyncClient.responses.pop(0)
+        self.last_response = FakeAsyncClient.responses.pop(0)
+        return self.last_response
 
     async def __aenter__(self) -> FakeAsyncClient:
         return self
@@ -503,14 +508,23 @@ def check_a6_approve_resume() -> str:
 
 
 def check_a6b_reject_resume() -> str:
-    """拒绝 -> 恰好一次 resume，decision=reject；只一张卡，有可读提示。"""
+    """拒绝 dangerous 工具（v2）：1 次 resume、1 张卡、resume 流恰好 1 条 final、0 token。
+
+    v1 的断言只到"发了 resume(reject)"为止；v2 补三条语义断言：
+      1. dangerous 被拒 -> 图终止，resume 流只有 `已拒绝执行 deep_research，本轮未产生内容`；
+      2. 零 token（不再有 25~48s 的续写，也不产生任何调研结论）；
+      3. 无 409（终止后状态回收，不是"待审批/冲突"）。
+    低风险（external）被拒维持 v1 回灌，见本函数末段。
+    """
     _reset()
     app.cl.user_session = FakeUserSession(
         {app.SESSION_THREAD_ID: "tid-6b", app.SESSION_USER_NAME: "developer"}
     )
     FakeAsyncClient.responses = [
         FakeResponse(_sse({"type": "interrupt", "data": INTERRUPT_DATA})),
-        FakeResponse(_sse({"type": "final", "content": "已按拒绝处理"})),
+        FakeResponse(
+            _sse({"type": "final", "content": "已拒绝执行 deep_research，本轮未产生内容"})
+        ),
     ]
     app.httpx.AsyncClient = FakeAsyncClient  # type: ignore[assignment]
     FakeAskActionMessage.queue = [{"payload": {"value": app.APPROVAL_ACTION_REJECT}}]
@@ -524,7 +538,37 @@ def check_a6b_reject_resume() -> str:
     assert body["approval_id"] == "apr_demo_001", f"approval_id 错误: {body!r}"
     assert len(_approval_cards()) == 1, "拒绝路径弹了多张卡"
     assert any("已拒绝执行" in m.content for m in SENT_MESSAGES), "拒绝后没有可读提示"
-    return "恰 1 次 /resume（decision=reject）；1 张卡；提示'已拒绝执行'"
+    _assert_reject_frames("deep_research")
+
+    # 低风险（external）被拒：仍回灌继续，本轮继续产生 token（防分档改坏低风险路径）
+    _reset()
+    app.cl.user_session = FakeUserSession({app.SESSION_THREAD_ID: "tid-6b-low"})
+    low_risk = dict(INTERRUPT_DATA, approval_id="apr_low", tool="search_knowledge")
+    low_risk["permission"] = "external"
+    FakeAsyncClient.responses = [
+        FakeResponse(_sse({"type": "interrupt", "data": low_risk})),
+        FakeResponse(
+            _sse(
+                {"type": "token", "content": "换个说法："},
+                {"type": "final", "content": "换个说法：我手上没有这项数据。"},
+            )
+        ),
+    ]
+    app.httpx.AsyncClient = FakeAsyncClient  # type: ignore[assignment]
+    FakeAskActionMessage.queue = [{"payload": {"value": app.APPROVAL_ACTION_REJECT}}]
+    _run_drive()
+
+    low_frames = _resume_frames()
+    low_types = [f["type"] for f in low_frames]
+    assert len([c for c in _resume_calls() if c["json"]["decision"] == "reject"]) == 1, (
+        f"低风险拒绝的 resume 次数不是 1: {_resume_calls()!r}"
+    )
+    assert "token" in low_types, f"低风险被拒后应继续产生 token（回灌继续）: {low_types}"
+    assert low_types[-1] == "final", f"低风险续跑缺少 final: {low_types}"
+    return (
+        "dangerous：1 次 resume(reject)、1 张卡、resume 流恰 1 条 final / 0 token、无 409；"
+        "external：仍回灌继续（有 token 且有 final）"
+    )
 
 
 def check_a7_resume_disabled() -> str:
@@ -559,13 +603,19 @@ def check_a7_resume_disabled() -> str:
 
 
 def check_a8_timeout_auto_reject() -> str:
-    """把超时压到 2s：自动按 reject 处理，提示后恰好一次 resume，不卡在 interrupted。"""
+    """把超时压到 2s：自动按 reject 处理，行为与手动拒绝**完全同义**（v2）。
+
+    v2 起"超时 = reject"不只是发一次 resume：dangerous 工具被超时拒绝后，
+    后端同样终止本轮——resume 流恰好 1 条 final、0 token，且不卡在 interrupted。
+    """
     _reset()
     app.APPROVAL_TIMEOUT_SECONDS = 2
     app.cl.user_session = FakeUserSession({app.SESSION_THREAD_ID: "tid-8"})
     FakeAsyncClient.responses = [
         FakeResponse(_sse({"type": "interrupt", "data": INTERRUPT_DATA})),
-        FakeResponse(_sse({"type": "final", "content": "已按超时拒绝处理"})),
+        FakeResponse(
+            _sse({"type": "final", "content": "已拒绝执行 deep_research，本轮未产生内容"})
+        ),
     ]
     app.httpx.AsyncClient = FakeAsyncClient  # type: ignore[assignment]
     FakeAskActionMessage.queue = []  # 模拟无响应
@@ -579,7 +629,12 @@ def check_a8_timeout_auto_reject() -> str:
     assert resumes[0]["json"]["decision"] == "reject", "超时没有按 reject 恢复"
     blob = " ".join(m.content for m in SENT_MESSAGES)
     assert "审批超时" in blob and "自动拒绝" in blob, f"超时提示缺失: {blob!r}"
-    return "AskAction timeout=2；1 次 resume(decision=reject)；提示含'审批超时'与'自动拒绝'"
+    # 与手动拒绝同义：终止帧 + 零 token + 无 409
+    _assert_reject_frames("deep_research")
+    return (
+        "AskAction timeout=2；1 次 resume(decision=reject)；提示含'审批超时'与'自动拒绝'；"
+        "与手动拒绝同义（恰 1 条 final / 0 token / 无 409）"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -757,6 +812,46 @@ def _resume_calls() -> list[dict]:
     return [c for c in _all_calls() if "/resume" in c["url"]]
 
 
+def _resume_frames() -> list[dict]:
+    """后台 resume 流里**实际被消费**的 SSE 帧（reject 分档语义 v2 的取证口）。
+
+    拒绝路径的续写由 `_drain_reject_resume` 后台消费，不进对话流；这里直接读
+    后台 client 最后收到的那个响应，核对帧序列本身（1 条 final / 0 条 token）。
+    """
+    client = FakeAsyncClient.instances[-1]
+    response = getattr(client, "last_response", None)
+    assert response is not None, "没有记录到 resume 响应"
+    frames: list[dict] = []
+    for line in response.consumed:
+        if line.startswith("data: "):
+            frames.append(json.loads(line[6:]))
+    return frames
+
+
+def _assert_reject_frames(tool: str, *, allow_leftover_interrupt: bool = False) -> None:
+    """v2：dangerous 被拒的 resume 流必须是「恰好 1 条 final + 0 条 token」。
+
+    Args:
+        tool: 被拒的工具名（终止帧里要出现）。
+        allow_leftover_interrupt: 重复帧用例里，服务端残留的第二条 interrupt 会被
+            后台消费掉（不渲染、不弹卡），核对帧序列时剔除它。
+    """
+    frames = _resume_frames()
+    types = [f["type"] for f in frames]
+    if allow_leftover_interrupt:
+        types = [t for t in types if t != "interrupt"]
+        frames = [f for f in frames if f["type"] != "interrupt"]
+    assert types == ["final"], f"dangerous 拒绝的 resume 流应只有 1 条 final: {types}"
+    assert frames[0]["content"] == f"已拒绝执行 {tool}，本轮未产生内容", (
+        f"终止帧文案不对: {frames[0]['content']!r}"
+    )
+    assert sum(1 for t in types if t == "token") == 0, f"终止分支不应产生 token: {types}"
+    blob = " ".join(m.content for m in SENT_MESSAGES)
+    for forged in ("报告", "QPS", "调研结论"):
+        assert forged not in frames[0]["content"], f"终止帧自造了内容: {forged}"
+    assert "409" not in blob and "请重新发起" not in blob, f"拒绝路径出现了 409 提示: {blob!r}"
+
+
 def check_c3b_distinct_approvals() -> str:
     """C3 正控：不同 approval_id 必须各弹一张卡，防"全局只显示一张"的过度去重。"""
     _reset()
@@ -811,12 +906,18 @@ def check_c3c_duplicate_reuse() -> str:
         "resume 的 decision 不是 approve"
     )
 
-    # 2) reject：提示只一次；resume 恰好一次（decision=reject），不算重复放行
+    # 2) reject：提示只一次；resume 恰好一次（decision=reject），不算重复放行；
+    #    v2：终止流恰好 1 条 final、0 token（重复帧只被后台消费，不弹卡、不重发）
     _reset()
     app.cl.user_session = FakeUserSession({app.SESSION_THREAD_ID: "tid-c3c-r"})
     FakeAsyncClient.responses = [
         FakeResponse(_sse({"type": "interrupt", "data": dup})),
-        FakeResponse(_sse({"type": "interrupt", "data": dup})),
+        FakeResponse(
+            _sse(
+                {"type": "interrupt", "data": dup},
+                {"type": "final", "content": "已拒绝执行 deep_research，本轮未产生内容"},
+            )
+        ),
     ]
     app.httpx.AsyncClient = FakeAsyncClient  # type: ignore[assignment]
     FakeAskActionMessage.queue = [{"payload": {"value": app.APPROVAL_ACTION_REJECT}}]
@@ -827,14 +928,20 @@ def check_c3c_duplicate_reuse() -> str:
     reject_resumes = _resume_calls()
     assert len(reject_resumes) == 1, f"reject 路径 resume 次数不是 1: {reject_resumes!r}"
     assert reject_resumes[0]["json"]["decision"] == "reject", "reject 的 decision 不是 reject"
+    _assert_reject_frames("deep_research", allow_leftover_interrupt=True)
 
-    # 3) 超时：提示只一次；resume 恰好一次（decision=reject）
+    # 3) 超时：提示只一次；resume 恰好一次（decision=reject）；与手动拒绝同义
     _reset()
     app.APPROVAL_TIMEOUT_SECONDS = 2
     app.cl.user_session = FakeUserSession({app.SESSION_THREAD_ID: "tid-c3c-t"})
     FakeAsyncClient.responses = [
         FakeResponse(_sse({"type": "interrupt", "data": dup})),
-        FakeResponse(_sse({"type": "interrupt", "data": dup})),
+        FakeResponse(
+            _sse(
+                {"type": "interrupt", "data": dup},
+                {"type": "final", "content": "已拒绝执行 deep_research，本轮未产生内容"},
+            )
+        ),
     ]
     app.httpx.AsyncClient = FakeAsyncClient  # type: ignore[assignment]
     FakeAskActionMessage.queue = []  # 无响应
@@ -845,9 +952,10 @@ def check_c3c_duplicate_reuse() -> str:
     timeout_resumes = _resume_calls()
     assert len(timeout_resumes) == 1, f"超时路径 resume 次数不是 1: {timeout_resumes!r}"
     assert timeout_resumes[0]["json"]["decision"] == "reject", "超时的 decision 不是 reject"
+    _assert_reject_frames("deep_research", allow_leftover_interrupt=True)
     return (
         "同 approval_id：1 卡 + 1 次 resume；重复帧被忽略；"
-        "reject/超时各 1 次提示、各 1 次 resume(reject)"
+        "reject/超时各 1 次提示、各 1 次 resume(reject)；v2 终止流均恰 1 条 final / 0 token"
     )
 
 

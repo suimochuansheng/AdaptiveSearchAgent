@@ -314,11 +314,19 @@ async def _resume_event_stream(
             # 恢复过程中又命中一次审批：会话重新进入挂起态
             await _set_task_state(thread_id, "interrupted", interrupt_time=datetime.now(UTC))
         else:
+            # 正常收尾——**包含 reject 分档语义 v2 的"dangerous 被拒即终止"**：
+            # 该路径图在 tools 之后直接 END，流以一条 final 结束，这里必须把会话放回
+            # completed，否则它会停在 interrupted，用户下一条消息会拿 409（语义不变）。
             await _set_task_state(thread_id, "completed")
     except ConversationStreamError:
         # error 帧已由 stream_conversation 推送，这里只记录
         logger.exception("恢复后的会话流执行错误（thread_id=%s）", thread_id)
         await _set_task_state(thread_id, "failed")
+    except GeneratorExit:
+        # 客户端中途断开：不回收就会留下僵尸 running；语义与 /chat/conversation 一致
+        logger.info("恢复后的会话流被客户端关闭（GeneratorExit, thread_id=%s）", thread_id)
+        await _set_task_state(thread_id, "idle")
+        raise
     except Exception as exc:  # noqa: BLE001 - 已经 200，只能以 error 帧收尾
         logger.exception("恢复后的会话流异常（thread_id=%s）", thread_id)
         yield f"data: {json.dumps({'type': 'error', 'message': f'服务异常：{exc}'}, ensure_ascii=False)}\n\n"

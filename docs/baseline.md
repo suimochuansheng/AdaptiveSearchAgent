@@ -13,6 +13,9 @@
 >   回归判据由 ±0.02 改为"**同口径跑 2 次取均值，两次均值差 ≤ 记录方差**"；新增 §7 Agent raw 基线。
 > - 2026-11-11（T-arch）：新增 1 份端口契约测试（2 例），pytest 通过数 223 -> 225，
 >   收集数 227 -> 229（总数 231 -> 233），nodeids 哈希同步更新；详见 §2 的说明。
+> - 2026-11-24（reject 分档语义 v2）：新增 5 例回归（图分档 2 / SSE 终止 2 / resume 状态机 1），
+>   pytest 通过数 225 -> 230，收集数 229 -> 233（总数 233 -> 237），nodeids 哈希同步更新；
+>   **不是回归**，详见 §2 的说明与 `docs/revisions/2026-11-24-reject-terminates-turn.md`。
 
 ---
 
@@ -38,22 +41,25 @@
 
 ## 2. 测试基线
 
-> **2026-11-11（T-arch）预期变化**：因新增 1 份端口契约测试
-> `tests/contracts/test_agent_runtime_contract.py`（N = **2** 例，参数化挂
-> `LangGraphRuntime` + `Fake`），收集数由 **227 变为 227+N = 229**（deselected 仍为 4，
-> 总数 231 -> 233），`pytest -q` 由 223 passed 变为 **225 passed**；nodeids 哈希随之
-> 更新。**这是有意的基线更新，不是回归**；除新增文件外没有改动任何既有用例。
+> **2026-11-24（reject 分档语义 v2）预期变化**：新增 **5 例**回归（N = 5）——
+> `tests/test_conversation_graph.py` 2 例（分档判据 + dangerous 拒绝后图不再叫模型）、
+> `tests/test_conversation_stream.py` 2 例（终止分支恰 1 条 final / 0 token；低风险拒绝仍出 token）、
+> `tests/api/test_resume_task_state.py` 1 例（终止后 `task_states=completed` + 释放锁）。
+> 收集数由 **229 变为 234**（deselected 仍为 4，总数 233 -> 238），`pytest -q` 由
+> 225 passed 变为 **230 passed**，nodeids 哈希随之更新。**这是有意的基线更新，不是回归**。
+>
+> 既有的 2026-11-11（T-arch）变化仍成立：新增 1 份端口契约测试（2 例）使 223 -> 225。
 
 | 项 | 值 |
 |---|---|
-| `pytest -q` | **225 passed, 4 skipped, 4 deselected**（后端未启动时） |
-| `pytest --collect-only -q` | **229/233 collected（4 deselected）**，无 import 失败 |
-| 测试文件数 | 28 |
-| `.pytest_cache/v/cache/nodeids` | 230 行，sha256 `8c3cab4dcbda90dd1c90dafb9d0ad88d43af47723ab3a2dfa03fba2a26d4c8f3` |
+| `pytest -q` | **230 passed, 4 skipped, 4 deselected**（后端未启动时） |
+| `pytest --collect-only -q` | **234/238 collected（4 deselected）**，无 import 失败 |
+| 测试文件数 | 29（新增 `tests/api/test_resume_task_state.py`） |
+| `.pytest_cache/v/cache/nodeids` | 235 行，sha256 `fd1aba40e9fa33ce359d1a903f09f2473d32b1c4231d90f0272924ae60765f5b` |
 
 > 回归时先比"总数与 nodeids 哈希"：数量变化不一定是回归，但**nodeids 哈希变化必须能解释**。
 > 重新生成：`pytest --collect-only -q` 后取其 sha256。
-> 上一版（T-arch 前）：223 passed / 227/231 / 228 行 / `a57008dd1a22cb16ff5096dda448dcee641f266ce63786dc96eb7bfe25657334`。
+> 上一版（reject v2 前，T-arch）：225 passed / 229/233 / 230 行 / `8c3cab4dcbda90dd1c90dafb9d0ad88d43af47723ab3a2dfa03fba2a26d4c8f3`。
 
 ## 3. 代码规模
 
@@ -139,8 +145,8 @@ top_k=3、workers=**2**、RAG 网关 **`http://localhost:8100`（ingest_dev 容�
 cd /home/ubhuazhu/dev_pros/AdaptiveSearchAgent
 eval $(poetry env activate)
 
-pytest -q                      # 期望 225 passed, 4 skipped, 4 deselected
-pytest --collect-only -q       # 期望 229/233 collected（4 deselected）
+pytest -q                      # 期望 230 passed, 4 skipped, 4 deselected
+pytest --collect-only -q       # 期望 234/238 collected（4 deselected）
 
 # Ragas（约 11 分钟）
 # 前置：RAG 网关必须在跑，否则脚本直接失败（不再兜底）

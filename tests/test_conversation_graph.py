@@ -5,7 +5,7 @@
 都不需要真实 LLM：deep_research 内部调用的旧图用假图替换。
 """
 
-from typing import Any
+from typing import Any, cast
 
 from src import conversation_graph as cg
 from src.context_manager import estimate_tokens
@@ -224,3 +224,116 @@ async def test_tools_node_runs_and_shrinks(monkeypatch) -> None:
     assert tool_messages, "calculator 应该被执行"
     assert "2" in str(tool_messages[0].content)
     assert result["messages"][-1].content == "答案是 2"
+
+
+# ── reject 分档语义 v2（2026-11-24）：只有 dangerous 被拒才终止本轮 ──────
+
+
+def _state_with_rejected_tool(
+    tool: str, outcome: str | None = "rejected_by_user"
+) -> "cg.ConversationState":
+    """构造"最后一条消息是被拒的工具结果"的会话状态。"""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    call = {"name": tool, "args": {}, "id": "call-x"}
+    return cast(
+        "cg.ConversationState",
+        {
+            "messages": [
+                HumanMessage("q"),
+                AIMessage(content="", tool_calls=[call]),
+                ToolMessage(
+                    content="用户拒绝执行该工具，本次未调用。", tool_call_id="call-x", name=tool
+                ),
+            ],
+            "last_tool_outcome": outcome,
+        },
+    )
+
+
+def test_route_after_tools_end_only_for_dangerous_rejection() -> None:
+    """分档判据是 spec.permission：dangerous→END，external/read→agent，未拒→agent。"""
+    # dangerous 被拒 -> 终止
+    assert cg._route_after_tools(_state_with_rejected_tool("deep_research")) is cg.END
+    # 低风险被拒 -> 维持 v1 回灌
+    assert cg._route_after_tools(_state_with_rejected_tool("search_knowledge")) == "agent"
+    assert cg._route_after_tools(_state_with_rejected_tool("calculator")) == "agent"
+    # 没有拒绝 -> 永远回模型
+    assert (
+        cg._route_after_tools(_state_with_rejected_tool("deep_research", outcome=None)) == "agent"
+    )
+    # 未注册工具按低风险处理（注册表缺项不得升级为终止）
+    assert cg._route_after_tools(_state_with_rejected_tool("mcp_gone_tool")) == "agent"
+
+
+async def test_dangerous_reject_ends_turn_without_calling_model_again(monkeypatch) -> None:
+    """端到端（无真实 LLM）：dangerous 被拒后图在 tools 之后 END，模型不再被叫第二次。"""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    class _ToolCallingModel:
+        def __init__(self, **kwargs: Any) -> None:
+            self.calls = 0
+
+        def bind_tools(self, tools: Any) -> "_ToolCallingModel":
+            return self
+
+        async def ainvoke(self, messages: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "deep_research", "args": {"query": "x"}, "id": "c1"}],
+                )
+            return AIMessage("模型不该被再次调用（否则就是自造内容）")
+
+    monkeypatch.setattr(cg, "ChatOllama", _ToolCallingModel)
+    monkeypatch.setattr(cg, "_deep_research_in_flight", False)
+    monkeypatch.setattr(
+        "src.graph_factory.build_graph",
+        lambda **kwargs: _FakeWorkflow(report="调研报告正文"),
+    )
+    # 模拟"用户点了拒绝"：执行器拒绝分支判定为真（图侧只依赖这一个信号）
+    monkeypatch.setattr(cg.executor, "is_user_rejection", lambda message: True)
+
+    graph = cg.build_conversation_graph()
+    result = await graph.ainvoke({"messages": [HumanMessage("帮我调研一下")]})
+
+    assert result["last_tool_outcome"] == "rejected_by_user"
+    last = result["messages"][-1]
+    assert isinstance(last, ToolMessage), f"本轮应终止在工具结果上: {type(last)}"
+    contents = [str(m.content) for m in result["messages"] if isinstance(m, AIMessage)]
+    assert "模型不该被再次调用（否则就是自造内容）" not in contents
+
+    # ── 对照：低风险（external）被拒仍回灌继续，本轮继续产生内容 ──────────
+    calls: list[int] = []
+
+    class _LowRiskModel:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def bind_tools(self, tools: Any) -> "_LowRiskModel":
+            return self
+
+        async def ainvoke(self, messages: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "search_knowledge", "args": {"query": "q"}, "id": "c2"}],
+                )
+            return AIMessage("tool 被拒了，我换个说法继续答。")
+
+    # 不真的去打 RAG 网关：这里只关心"被拒之后还回不回模型"
+    async def _fake_search_knowledge(query: str, **kwargs: Any) -> str:
+        """假的 RAG 检索：本用例只关心"被拒之后还回不回模型"，不真的打网关。"""
+        return "[stub] 检索结果"
+
+    monkeypatch.setattr("src.tools.rag.search_knowledge", _fake_search_knowledge)
+    monkeypatch.setattr(cg, "ChatOllama", _LowRiskModel)
+    graph2 = cg.build_conversation_graph()
+    result2 = await graph2.ainvoke({"messages": [HumanMessage("查一下内部知识库")]})
+
+    assert len(calls) == 2, f"external 被拒后应回灌继续（模型应被调用 2 次）: {len(calls)}"
+    assert result2["messages"][-1].content == "tool 被拒了，我换个说法继续答。"
+    # 结局字段在回到模型时被清掉，语义固定为"本轮"
+    assert result2["last_tool_outcome"] is None

@@ -21,7 +21,7 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import (
     RunnableConfig,  # noqa: TCH002 - LangGraph 运行期按签名注入 config
 )
@@ -191,6 +191,92 @@ class ConversationState(MessagesState):
     profile_context: str
     # 已经为第几轮触发过画像抽取（防止同一轮里 agent 多次执行时重复入队）
     profile_extract_upto: int
+    # reject 分档语义 v2（2026-11-24）：本轮最后一次工具执行的结局。
+    # 只有 `rejected_by_user` 会被条件边用到；其它结局由 trace 的 error_kind 表达。
+    # 旧 checkpoint 没有该字段也能继续跑（一律用 `.get` 读）。
+    last_tool_outcome: str | None
+
+
+# ── reject 分档语义 v2（2026-11-24 裁决，见 docs/contracts/approval.md §2.1）──
+# 判据是 `ToolSpec.permission`，**不是工具名**：
+#   - `dangerous` 被拒 -> 本轮直接 END，不进入模型推理（不产生任何内容）；
+#   - `external` / `read` / `write` 被拒 -> 维持 v1 语义，回灌"已拒绝"后继续本轮。
+# 为什么只把"被拒"这一个结局写进 state：工具在独立 Task 里执行，执行器的 ContextVar
+# 与 tool_call_id 索引都到不了 tools_node（后者还会被回调读空），而拒绝回执文本是
+# 执行器写死的常量，是唯一能跨节点稳定读到的信号。
+
+
+def _last_tool_outcome(messages: list[Any]) -> str | None:
+    """本轮最后一个 ToolMessage 的结局码；只区分"用户拒绝"。
+
+    不读 `tool_outcome` 的 ContextVar：`ToolNode` 把每个工具丢进独立 Task 执行，
+    执行上下文已经切走；按 `tool_call_id` 记的索引也会被回调读空。拒绝分支的回执
+    文本是执行器写死的常量（`executor.is_user_rejection` 就是拿它比对），这是唯一
+    能稳定跨节点读到的信号。其它结局由 trace 的 `error_kind` 承载，不在这里重复。
+    """
+    for message in reversed(messages):
+        if isinstance(message, ToolMessage):
+            return "rejected_by_user" if executor.is_user_rejection(message) else None
+    return None
+
+
+def _last_tool_message(state: ConversationState) -> ToolMessage | None:
+    """本轮最后一条消息若为工具结果则返回它，否则 None。"""
+    messages = state.get("messages") or []
+    if not messages:
+        return None
+    last = messages[-1]
+    return last if isinstance(last, ToolMessage) else None
+
+
+def _last_tool_call(state: ConversationState) -> tuple[str, str] | None:
+    """最后一条工具结果对应的 `(工具名, tool_call_id)`；定位不到返回 None。"""
+    message = _last_tool_message(state)
+    if message is None:
+        return None
+    call_id = str(getattr(message, "tool_call_id", "") or "")
+    if call_id:
+        # 同一轮可能有多个 tool_call：按 id 回到 AIMessage 里找本次调用的名字
+        for candidate in reversed((state.get("messages") or [])[:-1]):
+            for call in getattr(candidate, "tool_calls", None) or ():
+                if call.get("id") == call_id:
+                    return str(call.get("name", "")), call_id
+    name = str(getattr(message, "name", "") or "")
+    return (name, call_id) if name else None
+
+
+def _permission_of(tool_name: str) -> str | None:
+    """按注册表取工具权限；未注册（MCP 工具被注销等）返回 None，按低风险处理。"""
+    try:
+        return str(registry.spec(tool_name).permission)
+    except KeyError:
+        return None
+
+
+def _last_tool_is_dangerous(state: ConversationState) -> bool:
+    """本轮最后执行的那个工具是不是 `dangerous` 级（审批的唯一高危档）。"""
+    call = _last_tool_call(state)
+    return call is not None and _permission_of(call[0]) == "dangerous"
+
+
+def rejected_dangerous_tool_name(state: ConversationState) -> str | None:
+    """本轮是否「拒绝 dangerous 工具」而终止；是则返回该工具名（终止帧要用）。
+
+    会话流（`src/conversation_stream.py`）与条件边共用这一个判据，避免两处口径漂移。
+    """
+    if state.get("last_tool_outcome") != "rejected_by_user":
+        return None
+    if not _last_tool_is_dangerous(state):
+        return None
+    call = _last_tool_call(state)
+    return call[0] if call else None
+
+
+def _route_after_tools(state: ConversationState) -> str:
+    """工具节点之后的唯一岔口（reject 分档语义 v2）。"""
+    if state.get("last_tool_outcome") == "rejected_by_user" and _last_tool_is_dangerous(state):
+        return END  # 只有 dangerous 才终止；低风险被拒继续回灌
+    return "agent"
 
 
 def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
@@ -238,7 +324,8 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
         )
         response = await model.ainvoke(built.messages)
 
-        update: dict = {"messages": [response]}
+        # 每轮进入模型推理时清掉上一轮的工具结局，字段语义固定为"本轮"
+        update: dict = {"messages": [response], "last_tool_outcome": None}
         if built.summarized or built.summary_upto != (state.get("summary_upto") or 0):
             update["context_summary"] = built.summary
             update["summary_upto"] = built.summary_upto
@@ -276,10 +363,10 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
         thread_id = str((config.get("configurable") or {}).get("thread_id", "default"))
         with executor.tool_scope(thread_id):
             result = await tool_node.ainvoke(state)
+        messages = result["messages"]
         return {
-            "messages": [
-                shrink_tool_message(message, thread_id=thread_id) for message in result["messages"]
-            ]
+            "messages": [shrink_tool_message(message, thread_id=thread_id) for message in messages],
+            "last_tool_outcome": _last_tool_outcome(messages),
         }
 
     graph = StateGraph(ConversationState)
@@ -292,7 +379,8 @@ def build_conversation_graph(checkpointer: BaseCheckpointSaver | None = None):
         # 唯一的循环判断点：最后一条消息是否包含工具调用请求
         lambda state: "tools" if state["messages"][-1].tool_calls else END,
     )
-    graph.add_edge("tools", "agent")
+    # tools -> 分支（reject 分档语义 v2）：dangerous 被拒即 END，其余回模型继续
+    graph.add_conditional_edges("tools", _route_after_tools)
 
     compiled = graph.compile(checkpointer=checkpointer)
 

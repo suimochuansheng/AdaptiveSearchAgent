@@ -95,6 +95,7 @@ __all__ = [
     "approval_resume_scope",
     "current_scope",
     "get_default_ledger",
+    "is_user_rejection",
     "reset_auto_approved_count",
     "auto_approved_count",
     "set_default_ledger",
@@ -316,6 +317,24 @@ def wrap_tool(
     if inspect.signature(wrapped) != original_signature:
         raise RuntimeError(f"工具包装后签名不一致：{spec.name}")
     return wrapped
+
+
+def is_user_rejection(message: Any) -> bool:
+    """判断一条工具结果是否是「用户拒绝执行」的产物（reject 分档语义 v2 的判据之一）。
+
+    为什么不读 `tool_outcome` 的 ContextVar：`ToolNode` 把同一轮的每个工具丢进独立的
+    asyncio Task 执行，执行器在工具任务里设置的 ContextVar 回不到 `tools_node` 的上下文；
+    按 `tool_call_id` 记的索引又会被回调在 `on_tool_end` 里读走清空。拒绝分支的回执文本
+    是执行器自己写死的常量，两条链路看到的是同一个字符串，所以只认这一条判据。
+
+    Args:
+        message: `ToolMessage` 或工具原始返回值。
+
+    Returns:
+        是否走了拒绝分支。
+    """
+    content = getattr(message, "content", message)
+    return isinstance(content, str) and content == _REJECTED_MESSAGE
 
 
 def _mark_outcome(value: Any, code: str, tool_name: str, kwargs: dict[str, Any]) -> Any:

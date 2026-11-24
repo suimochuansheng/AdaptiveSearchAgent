@@ -1,7 +1,8 @@
 # 契约 · Approval（工具级人工审批）
 
-> 卡：**T1-2（G3 契约冻结）** ｜ 状态：**v1 已冻结（2026-11-11）** ｜ 本文件：`docs/contracts/approval.md`
-> 上游依据：《Agent 架构设计定稿主文档》2.4.2 / 2.9；2026-11-11 裁决 P4（`docs/pending.md`）
+> 卡：**T1-2（G3 契约冻结）** ｜ 状态：**v1 已冻结（2026-11-11）→ v2（2026-11-24，`reject` 分档语义）** ｜ 本文件：`docs/contracts/approval.md`
+> 上游依据：《Agent 架构设计定稿主文档》2.4.2 / 2.9；2026-11-11 裁决 P4（`docs/pending.md`）；
+> 2026-11-24 计划窗口 D16 裁决（`docs/revisions/2026-11-24-reject-terminates-turn.md`）
 > 消费方：`agent/domain/roles.py`（本卡）、`agent/app`（T9-2 策略与状态机）、
 > `agent/adapters/runtime`（T3-2b 挂起/恢复）、`frontend/app.py`（G9 审批卡片）
 >
@@ -53,11 +54,41 @@ Decision = Literal["approve", "reject"]
 | 值 | 含义 | 服务端行为 |
 |---|---|---|
 | `approve` | 同意执行 | 消费 `approval_id`，按 `tool_call_id` 续跑该次工具调用，继续本轮的 SSE |
-| `reject` | 拒绝执行 | 消费 `approval_id`，不执行工具，把"已拒绝"作为工具结果回灌模型，本轮继续 |
+| `reject` | 拒绝执行 | 消费 `approval_id`，**不执行工具、不记账、不扣预算**；随后按 `ToolSpec.permission` 分档（§2.1）：`dangerous` → **终止本轮**（不再进模型推理）；其余 → 把"已拒绝"作为工具结果回灌模型，本轮继续 |
 <!-- /t12:enum Decision -->
 
 **不做 `approve_and_remember`**（2026-11-10 审批结论）：任何"记住这个选择 / 本会话放行"
 都是隐式放行，会绕过审计与逐次成本核对，v1 不提供。
+
+### 2.1 `reject` 的分档语义（v2，2026-11-24 裁决）
+
+`reject` **不是全局**"本轮到此为止"，也**不是** v1 那样一律回灌——**按被批工具的风险档位分流**。
+判据只用 `ToolSpec.permission`（见 `tool-spec.md` §2），**不按工具名硬编码**，不新增枚举值。
+
+| `permission` | 拒绝后行为 | 是否再进模型推理 | 本轮是否推送增量文本帧（`token`） | 典型工具 |
+|---|---|---|---|---|
+| `dangerous` | **终止本轮**：图在 tools 之后直接 `END`，本轮 SSE 以**恰好一条** `final` 收尾 | 否 | 否（0 条） | `deep_research` |
+| `external` / `read` / `write` | **回灌继续**（= v1 语义）：把"已拒绝"作为工具结果交给模型，模型可用别的路径作答 | 是 | 是（正常流式） | `search_knowledge` / `search_tavily` / `calculator` / `read_offload` |
+
+终止分支的 `final` 文案固定为：`已拒绝执行 {tool_name}，本轮未产生内容`。
+
+条文细则：
+
+1. **终止只对 `dangerous` 成立**。`dangerous` 是"能力门"（有成本模型、单次可跑数百秒）；
+   用户拒绝的潜台词是"这一轮我不批这笔钱 / 这个长任务"。若让模型绕过审批自造一份内容
+   （实测：拒绝 `deep_research` 后自造 3095 字带假数字的"调研报告"），审批就只拦住了工具、
+   没拦住产出，比直接报错更有害。
+2. **低风险维持回灌**。`external` / `read` / `write` 的拒绝只意味着"这条路径不通"，
+   模型换个安全做法是期望行为；把它们也终止，等于把"拒绝一次"放大成"这一轮什么都别答"。
+3. **未注册的工具**按低风险处理（维持回灌）：审批链路不得因注册表缺项而升级为终止。
+4. **超时与 TTL 过期同义**：前端 120s 超时按 `reject` 处理、**不调用** `/resume`（§4）；
+   凭据 TTL 到期返回的 `410` 仍是纯状态码分支，不参与"本轮终止与否"的判定。
+5. **状态码一律不变**：`409` / `410` / `404` / `200` 的语义与本条无关，见
+   [resume-http.md](resume-http.md) §4。终止路径结束后会话回到 `completed`（或 `idle`）并释放锁。
+6. **预算与审计不变**：终止分支不执行工具、不记账、不扣预算；trace 的 tool span 仍以
+   `error_kind=rejected_by_user` 记录"被拒"。
+7. **不做"拒绝并说明"**：带 feedback 的第三按钮属 **v2.1**，需要新增 `Decision` 枚举值，
+   本版不加——必须改工具字段或枚举时，由计划窗口另升 v3 并同步 `t12_checks.py`。
 
 ## 3. `approval_id` 规则
 
@@ -89,6 +120,8 @@ approved/rejected/timeout 之后收到 409/410 -> aborted（提示重新发起�
 4. TTL 固定 10 分钟；`expires_at` 必须是带偏移的 ISO 8601 字符串。
 5. 审批信息只出现在 `RuntimeEvent(kind="interrupt")` 的 `payload.approval`，不得新开 kind。
 6. 前端超时按 `reject` 处理，**不调用** `/resume`（避免"超时即放行"）。
+7. `reject` 的分流只由 `ToolSpec.permission` 决定：`dangerous` 终止、其余回灌；
+   不得按工具名硬编码，也不得把低风险拒绝升级为终止（§2.1）。
 
 ## 6. 谁消费它
 
@@ -107,3 +140,4 @@ approved/rejected/timeout 之后收到 409/410 -> aborted（提示重新发起�
 |---|---|---|---|
 | 2026-11-11 | v1 | 冻结 `ApprovalRequest` 八字段与 `Decision` 二值 | T1-2；主文档 2.4.2 / 2.9 |
 | 2026-11-11 | v1 | **删除 `token` 字段**：只留 `approval_id` / `decision` / `request_id` 三字段；理由 = 第二凭证与 `approval_id` 同通道下发，不增加实质安全，一次性 `approval_id` + `request_id` 幂等 + 会话锁已覆盖重放 | OI-TDM-003 裁决；`docs/pending.md` P4 |
+| 2026-11-24 | **v2** | `reject` 升为**分档语义**（新增 §2.1，§2 表 `reject` 行改写，§5 加第 7 条不变量）：`dangerous` 被拒 → **终止本轮**（不回模型推理、零 token、恰好一条 `final`）；`external`/`read`/`write` → 维持回灌继续。字段与 `Decision` 枚举**未改** | 计划窗口 D16 裁决；`docs/revisions/2026-11-24-reject-terminates-turn.md` |

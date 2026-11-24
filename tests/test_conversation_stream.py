@@ -293,3 +293,65 @@ async def test_new_tool_calls_in_this_turn_are_still_reported() -> None:
     calls = [e for e in events if e["type"] == "tool_call"]
     assert len(calls) == 1
     assert calls[0]["tools"][0]["name"] == "deep_research"
+
+
+# ── reject 分档语义 v2（2026-11-24）：终止 vs 回灌 ──────────────────────
+
+
+def _rejected_state(tool: str, call_id: str = "call-r") -> dict[str, Any]:
+    """构造"本轮工具被用户拒绝"的最终快照（含 tool_call 以便查权限档位）。"""
+    call = {"name": tool, "args": {"query": "q"}, "id": call_id}
+    return {
+        "messages": [
+            HumanMessage("q"),
+            AIMessage(content="", tool_calls=[call]),
+            # ToolMessage 的内容就是执行器拒绝分支的固定回执
+            ToolMessage(
+                content="用户拒绝执行该工具，本次未调用。", tool_call_id=call_id, name=tool
+            ),
+        ],
+        "last_tool_outcome": "rejected_by_user",
+    }
+
+
+async def test_dangerous_reject_terminates_with_exactly_one_final() -> None:
+    """dangerous 被拒：恰好一条 final、零 token，且内容不含任何调研结论。"""
+    rejected = _rejected_state("deep_research")
+    # 历史里已有那条 tool_call：checkpoint 回放时不应再补发 tool_call 帧
+    graph = _FakeGraph([("values", rejected)], prior_messages=rejected["messages"][:2])
+
+    events = await _collect(graph)
+
+    assert [e["type"] for e in events] == ["final"]
+    assert events[0]["content"] == "已拒绝执行 deep_research，本轮未产生内容"
+    blob = events[0]["content"]
+    for forged in ("报告", "QPS", "调研结论", "综上"):
+        assert forged not in blob, f"终止帧里出现了不该有的内容: {forged}"
+
+
+async def test_low_risk_reject_keeps_streaming() -> None:
+    """external/read 被拒：维持 v1 回灌继续，本轮照常出 token 并给完整 final。"""
+    rejected = _rejected_state("search_knowledge", call_id="call-k")
+    graph = _FakeGraph(
+        [
+            ("values", rejected),
+            _chunk("换个说法："),
+            (
+                "values",
+                {
+                    "messages": [
+                        *rejected["messages"],
+                        AIMessage("换个说法：我手上没有这项数据。"),
+                    ],
+                    "last_tool_outcome": None,
+                },
+            ),
+        ],
+        prior_messages=rejected["messages"][:2],
+    )
+
+    events = await _collect(graph)
+
+    assert [e["type"] for e in events] == ["token", "final"]
+    assert events[0]["content"] == "换个说法："
+    assert events[-1]["content"] == "换个说法：我手上没有这项数据。"
