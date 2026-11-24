@@ -2,8 +2,8 @@
 """TEG 轻量评测门禁 —— 测试窗口独立验收（不照抄开发冒烟脚本）。
 
 卡号：TEG「轻量评测门禁」（补丁基线 83bf142：三态判据 + 评测前探活 + 有效性标记）
-目的：自己构造 fixture，逐条验收 A1~A8（功能有效性）、B1~B7（不变量）、
-      C1~C5（有效性守卫断言，复验 5 个 OI）+ C6~C7（边界观察，只记 open_issue）。
+目的：自己构造 fixture，逐条验收 A1~A13（功能有效性 + 判据修正）、
+      B1~B10（不变量 + 措辞一致性）、C1~C10（守卫断言 + 边界观察，观察项只记 open_issue）。
 运行：poetry run python "tests/test_agent_cases/TEG-评测门禁/teg_checks.py"
       （cwd 任意；脚本自己定位仓库根）
 数据与编码：fixture 全部写 tempfile；A1/A6 会真跑一次最小评测（--limit 1），
@@ -349,23 +349,27 @@ def check_a2() -> str:
 
 
 def check_a3() -> str:
-    """四个边界：方差 0 / 只有 1 题 / 缺 score / 题集完全不一致 —— 可读错误 + 退出码 2。"""
+    """四个边界：方差为负 / 只有 1 题 / 缺 score / 题集不一致 —— 可读错误 + 退出码 2。
+
+    注意：本轮判据修正后「方差为 0」是合法输入（有效阈值另有单题当量下限），
+    旧断言已移出本检查，改由 A13 断言新行为。
+    """
     scenarios = [
         (
-            "方差为 0",
+            "方差为负",
             [
                 "--baseline",
                 _run_dir("teg-base"),
                 "--candidate",
                 _run_dir("teg-up"),
                 "--variance",
-                "0",
+                "-0.1",
             ],
             ("输入不合法", "方差"),
         ),
         (
             "只有 1 题",
-            ["--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-single")],
+            ["--baseline", _run_dir("teg-single"), "--candidate", _run_dir("teg-single")],
             ("输入不合法", "共同"),
         ),
         (
@@ -376,7 +380,7 @@ def check_a3() -> str:
         (
             "题集完全不一致",
             ["--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-disjoint")],
-            ("输入不合法", "共同"),
+            ("输入不合法", "题集不一致"),
         ),
     ]
     evidence: list[str] = []
@@ -385,7 +389,8 @@ def check_a3() -> str:
         combined = proc.stdout + proc.stderr
         _no_traceback(combined)
         _assert(
-            proc.returncode == 2, f"{name} 退出码应为 2，实际 {proc.returncode}：{combined[-300:]}"
+            proc.returncode == 2,
+            f"{name} 退出码应为 2，实际 {proc.returncode}：{combined[-300:]}",
         )
         for needle in needles:
             _assert(needle in combined, f"{name} 错误信息缺 {needle!r}：{combined[-300:]}")
@@ -579,6 +584,172 @@ def check_a8() -> str:
     return f"两次 gate 输出一致（exit={first.returncode}），report.md 逐字节一致"
 
 
+# --------------------------------------------------------------------------- A9
+
+
+def check_a9() -> str:
+    """阈值下限：n=20、step=1 时单题当量 0.05；--variance 0.01 不降阈。"""
+    payload = json.loads(
+        _gate_cli(
+            "--baseline",
+            _run_dir("teg-n20-base"),
+            "--candidate",
+            _run_dir("teg-n20-d1"),
+            "--variance",
+            "0.01",
+            "--json",
+        ).stdout
+    )
+    _assert(
+        abs(payload["one_case_weight"] - 0.05) < 1e-9,
+        f"单题当量应为 0.05，实际 {payload['one_case_weight']}",
+    )
+    _assert(
+        abs(payload["recorded_variance"] - 0.01) < 1e-9,
+        f"记录方差应为 0.01，实际 {payload['recorded_variance']}",
+    )
+    _assert(
+        abs(payload["threshold_used"] - 0.05) < 1e-9,
+        f"有效阈值应为 0.05（取大），实际 {payload['threshold_used']}",
+    )
+    return "n=20/step=1 -> one_case_weight=0.05；variance=0.01 时 threshold_used 仍为 0.05"
+
+
+# --------------------------------------------------------------------------- A10
+
+
+def check_a10() -> str:
+    """净降 1 题（-0.05）-> PASS；净降 3 题（-0.15）-> FAIL_DEGRADED。"""
+    one = _gate_cli(
+        "--baseline", _run_dir("teg-n20-base"), "--candidate", _run_dir("teg-n20-d1"), "--json"
+    )
+    payload_one = json.loads(one.stdout)
+    _assert(one.returncode == 0, f"净降 1 题应 exit 0，实际 {one.returncode}：{one.stderr[-300:]}")
+    _assert(payload_one["status"] == "PASS", f"净降 1 题应为 PASS，实际 {payload_one['status']}")
+    _assert(
+        abs(payload_one["delta"] + 0.05) < 1e-9,
+        f"delta 应为 -0.05，实际 {payload_one['delta']}",
+    )
+
+    three = _gate_cli(
+        "--baseline", _run_dir("teg-n20-base"), "--candidate", _run_dir("teg-n20-d3"), "--json"
+    )
+    payload_three = json.loads(three.stdout)
+    _assert(
+        three.returncode == 1, f"净降 3 题应 exit 1，实际 {three.returncode}：{three.stderr[-300:]}"
+    )
+    _assert(
+        payload_three["status"] == "FAIL_DEGRADED",
+        f"净降 3 题应为 FAIL_DEGRADED，实际 {payload_three['status']}",
+    )
+    _assert(
+        abs(payload_three["delta"] + 0.15) < 1e-9,
+        f"delta 应为 -0.15，实际 {payload_three['delta']}",
+    )
+    return "净降 1 题：exit 0 / PASS / delta -0.05；净降 3 题：exit 1 / FAIL_DEGRADED / delta -0.15"
+
+
+# --------------------------------------------------------------------------- A11
+
+
+def check_a11() -> str:
+    """逐题抖动：flips{up,down,unchanged} 之和 = n_cases；sign_test_p ∈ [0,1]。"""
+    mix = gate.compare(store.load_run("teg-n20-base"), store.load_run("teg-n20-mix"))
+    _assert(
+        mix.flips["up"] == 10 and mix.flips["down"] == 10,
+        f"混合 fixture flips 不对：{dict(mix.flips)}",
+    )
+    _assert(
+        sum(mix.flips.values()) == mix.n_cases == 20,
+        f"flips 之和 {sum(mix.flips.values())} 应等于 n_cases {mix.n_cases}",
+    )
+    _assert(0.0 <= mix.sign_test_p <= 1.0, f"sign_test_p 越界：{mix.sign_test_p}")
+
+    one = gate.compare(store.load_run("teg-n20-base"), store.load_run("teg-n20-d1"))
+    _assert(
+        sum(one.flips.values()) == one.n_cases,
+        f"单题退化 flips 之和 {sum(one.flips.values())} 应等于 n_cases {one.n_cases}",
+    )
+    _assert(0.0 <= one.sign_test_p <= 1.0, f"sign_test_p 越界：{one.sign_test_p}")
+    return (
+        f"混合 flips={dict(mix.flips)} 求和 20，p={mix.sign_test_p:.2f}；"
+        f"单题退化 flips={dict(one.flips)} 求和 20"
+    )
+
+
+# --------------------------------------------------------------------------- A12
+
+
+def check_a12() -> str:
+    """--variance auto：同 config/commit/数据集有重复 run 时给实测方差，否则回退 0.0408。"""
+    hit = _gate_cli(
+        "--baseline",
+        _run_dir("teg-n20-base"),
+        "--candidate",
+        _run_dir("teg-n20-d1"),
+        "--variance",
+        "auto",
+        "--json",
+    )
+    _assert(
+        hit.returncode == 0, f"auto 命中时 exit 应为 0，实际 {hit.returncode}：{hit.stderr[-300:]}"
+    )
+    payload_hit = json.loads(hit.stdout)
+    _assert("variance auto:" in hit.stderr, f"stderr 未打印实测方差：{hit.stderr[-300:]}")
+    _assert(
+        abs(payload_hit["recorded_variance"] - 0.5) < 1e-9,
+        f"实测方差应为 0.5（auto-a 9.0 vs auto-b 8.5），实际 {payload_hit['recorded_variance']}",
+    )
+
+    miss = _gate_cli(
+        "--baseline",
+        _run_dir("teg-unique-sha"),
+        "--candidate",
+        _run_dir("teg-n20-d1"),
+        "--variance",
+        "auto",
+        "--json",
+    )
+    payload_miss = json.loads(miss.stdout)
+    _assert("回退到 0.0408" in miss.stderr, f"未命中时缺回退提示：{miss.stderr[-300:]}")
+    _assert(
+        abs(payload_miss["recorded_variance"] - 0.0408) < 1e-9,
+        f"未命中应回退 0.0408，实际 {payload_miss['recorded_variance']}",
+    )
+    return (
+        "命中：stderr variance auto: 0.5000，recorded_variance=0.5；未命中：回退 0.0408 并打印提示"
+    )
+
+
+# --------------------------------------------------------------------------- A13
+
+
+def check_a13() -> str:
+    """--variance 0 合法（旧「方差 0 报错」边界已废弃）：阈值取单题当量。"""
+    proc = _gate_cli(
+        "--baseline",
+        _run_dir("teg-n20-base"),
+        "--candidate",
+        _run_dir("teg-n20-d1"),
+        "--variance",
+        "0",
+        "--json",
+    )
+    combined = proc.stdout + proc.stderr
+    _no_traceback(combined)
+    _assert(proc.returncode in (0, 1), f"--variance 0 不应报错（退出码 2），实际 {proc.returncode}")
+    payload = json.loads(proc.stdout)
+    _assert(
+        abs(payload["recorded_variance"]) < 1e-12,
+        f"recorded_variance 应为 0，实际 {payload['recorded_variance']}",
+    )
+    _assert(
+        abs(payload["threshold_used"] - 0.05) < 1e-9,
+        f"方差 0 时阈值应取单题当量 0.05，实际 {payload['threshold_used']}",
+    )
+    return f"--variance 0 合法：exit={proc.returncode}，recorded_variance=0，threshold_used=0.05"
+
+
 # --------------------------------------------------------------------------- B1
 
 
@@ -729,6 +900,66 @@ def check_b7() -> str:
     outsiders = [row["case_id"] for row in teg if row.get("run_by", "").strip() != "test-TEG"]
     _assert(not outsiders, f"发现非 test-TEG 写的 TEG 行：{outsiders}")
     return f"TEG 行 {len(teg)} 条，全部 run_by=test-TEG"
+
+
+# --------------------------------------------------------------------------- B8
+
+
+def check_b8() -> str:
+    """PASS 时 reason 不得出现「失败归因」，应写「变化归因」。"""
+    res = gate.compare(store.load_run("teg-n20-base"), store.load_run("teg-n20-mix"))
+    _assert(res.status == "PASS", f"混合 fixture 应为 PASS，实际 {res.status}")
+    _assert(
+        "失败归因" not in res.reason,
+        f"PASS reason 仍含「失败归因」：{res.reason}",
+    )
+    _assert("变化归因" in res.reason, f"PASS reason 未写「变化归因」：{res.reason}")
+    return f"PASS 措辞合规：{res.reason[:120]}"
+
+
+# --------------------------------------------------------------------------- B9
+
+
+def check_b9() -> str:
+    """delta==0 写「无差异」；delta!=0 且小于阈值不得写「无漂移」。"""
+    zero = gate.compare(store.load_run("teg-base"), store.load_run("teg-same"))
+    _assert(abs(zero.delta) < 1e-12, f"零差值 fixture delta 应为 0，实际 {zero.delta}")
+    _assert("无差异" in zero.reason, f"零差值 reason 未写「无差异」：{zero.reason}")
+
+    # 显式给 0.06 记录方差，让 |delta|=0.05 严格小于有效阈值（0.06），
+    # 专门检验「非零差值但落在阈值内」的措辞，而不是卡在等号边界。
+    within = gate.compare(
+        store.load_run("teg-n20-base"), store.load_run("teg-n20-d1"), variance=0.06
+    )
+    _assert(abs(within.delta) > 1e-12, f"非零差值 fixture delta 不应为 0：{within.delta}")
+    _assert(within.status == "PASS", f"净降 1 题应为 PASS，实际 {within.status}")
+    _assert(
+        abs(within.delta) < within.threshold_used,
+        f"fixture 应满足 |delta| < 阈值：{within.delta} vs {within.threshold_used}",
+    )
+    _assert(
+        "无漂移" not in within.reason,
+        f"非零差值（|delta| 小于阈值）仍写「无漂移」：{within.reason}",
+    )
+    return f"零差值写「无差异」；非零差值 reason 未写「无漂移」：{within.reason[:100]}"
+
+
+# --------------------------------------------------------------------------- B10
+
+
+def check_b10() -> str:
+    """真实复算两条命令：符号检验与题当量必须同时出现在输出里。"""
+    pair = _gate_cli("--baseline", _run_dir("teg-n20-base"), "--candidate", _run_dir("teg-n20-d1"))
+    last = _gate_cli("--compare", "last")
+    for name, proc in (("显式两 run", pair), ("--compare last", last)):
+        _no_traceback(proc.stdout + proc.stderr)
+        _assert(
+            proc.returncode in (0, 1),
+            f"{name} 退出码异常：{proc.returncode}：{proc.stderr[-300:]}",
+        )
+        _assert("符号检验" in proc.stdout, f"{name} 输出缺「符号检验」：{proc.stdout[-300:]}")
+        _assert("题当量" in proc.stdout, f"{name} 输出缺「题当量」：{proc.stdout[-300:]}")
+    return "两条命令（显式 --baseline/--candidate 与 --compare last）均同时输出符号检验与题当量"
 
 
 # --------------------------------------------------------------------------- C1
@@ -928,6 +1159,62 @@ def check_c7() -> str:
     return f"latest_run -> {latest.run_id}（ci-smoke 子目录未被误选），list_runs=1"
 
 
+# --------------------------------------------------------------------------- C8
+
+
+def check_c8() -> str:
+    """观察：n_cases=2 时单题当量 0.5，几乎必然 PASS，是否提示样本过小。"""
+    res = gate.compare(store.load_run("teg-n2-base"), store.load_run("teg-n2-cand"))
+    _assert(res.n_cases == 2, f"n_cases 应为 2，实际 {res.n_cases}")
+    _assert(
+        abs(res.one_case_weight - 0.5) < 1e-9,
+        f"n=2 单题当量应为 0.5，实际 {res.one_case_weight}",
+    )
+    _assert(res.status == "PASS", f"delta=-0.5 仍应为 PASS，实际 {res.status}")
+    hints = [w for w in ("样本过小", "判别力", "题数过少") if w in res.reason]
+    suffix = "" if hints else " -> 未提示样本过小/判据无判别力，记 OI-TEG-006"
+    return f"n=2 当量 0.5，delta=-0.5 仍 PASS；提示={hints or '无'}{suffix}"
+
+
+# --------------------------------------------------------------------------- C9
+
+
+def check_c9() -> str:
+    """观察：非整数分数（0~1）时 score_step 如何推断，是否写进 reason。"""
+    payload = json.loads(
+        _gate_cli(
+            "--baseline",
+            _run_dir("teg-unit-base"),
+            "--candidate",
+            _run_dir("teg-unit-cand"),
+            "--json",
+        ).stdout
+    )
+    step = float(payload["score_step"])
+    _assert(abs(step - 0.1) < 1e-9, f"0~1 分数应推出 step=0.1，实际 {step}")
+    in_reason = ("步长" in payload["reason"]) or ("score_step" in payload["reason"])
+    suffix = "" if in_reason else " -> score_step 未写进 reason（只写单题当量），记 OI-TEG-009"
+    return (
+        f"score_step={step}（由最小非零分数差推出），"
+        f"one_case_weight={payload['one_case_weight']}{suffix}"
+    )
+
+
+# --------------------------------------------------------------------------- C10
+
+
+def check_c10() -> str:
+    """观察：两次 run 数据集 sha256 不同时的行为。"""
+    proc = _gate_cli(
+        "--baseline", _run_dir("teg-base"), "--candidate", _run_dir("teg-other-dataset")
+    )
+    combined = proc.stdout + proc.stderr
+    _no_traceback(combined)
+    silent = proc.returncode in (0, 1) and "数据集" not in combined
+    suffix = " -> 直接对比不校验 dataset_sha256（静默按均值比较），记 OI-TEG-010" if silent else ""
+    return f"sha 不同时 exit={proc.returncode}，输出{'未' if silent else '已'}提及数据集{suffix}"
+
+
 # --------------------------------------------------------------------------- 主流程
 
 
@@ -940,6 +1227,11 @@ CHECKS: list[tuple[str, Any]] = [
     ("A6 探活拒绝不落目录 + --allow-degraded 标 invalid", check_a6),
     ("A7 backfill GB18030/候选数/来源/不动 datasets", check_a7),
     ("A8 gate 幂等", check_a8),
+    ("A9 阈值下限：单题当量 0.05，variance 0.01 不降阈", check_a9),
+    ("A10 净降 1 题 PASS / 净降 3 题 FAIL", check_a10),
+    ("A11 逐题抖动 flips 求和 = n，符号检验 p ∈ [0,1]", check_a11),
+    ("A12 --variance auto 命中实测方差 / 未命中回退", check_a12),
+    ("A13 --variance 0 合法，阈值取单题当量", check_a13),
     ("B1 pytest 225 + collect-only 229/233", check_b1),
     ("B2 schema MATCH + lint-imports 3 kept", check_b2),
     ("B3 ci.yml 零改动 + 新 workflow 仅手动/定时", check_b3),
@@ -947,6 +1239,9 @@ CHECKS: list[tuple[str, Any]] = [
     ("B5 无前端产物/无服务启动代码", check_b5),
     ("B6 docs/baseline.md 数字未动", check_b6),
     ("B7 台账无开发窗口写的 TEG 行", check_b7),
+    ("B8 PASS 时不得写「失败归因」（应写「变化归因」）", check_b8),
+    ("B9 非零差值小于阈值不得写「无漂移」", check_b9),
+    ("B10 两条真实命令同时输出符号检验与题当量", check_b10),
     ("C1 无效基线默认拒绝 + 放行记 quality_warning", check_c1),
     ("C2 题集不一致默认拒绝 + --allow-partial 标记", check_c2),
     ("C3 零差值 reason 含「无差异」", check_c3),
@@ -954,6 +1249,9 @@ CHECKS: list[tuple[str, Any]] = [
     ("C5 git 版本不同 code_version_changed + 报告提示", check_c5),
     ("C6 观察：失败 case 超 10 条是否截断", check_c6),
     ("C7 观察：ci-smoke 子目录是否被 latest_run 误选", check_c7),
+    ("C8 观察：n=2 当量 0.5 是否提示样本过小", check_c8),
+    ("C9 观察：非整数分数的 score_step 推断与措辞", check_c9),
+    ("C10 观察：数据集 sha256 不同时的行为", check_c10),
 ]
 
 
@@ -999,6 +1297,66 @@ def _build_fixtures() -> None:
         "teg-twelve-cand",
         [_case(f"q{index:03d}", 5) for index in range(1, 13)],
         created_at="2026-11-23T00:01:00",
+    )
+
+    # ---- 判据修正（本轮）：20 题 / 单题当量 0.05 ----
+    _make_fixture("teg-n20-base", [_case(f"q{index:03d}", 9) for index in range(1, 21)])
+    _make_fixture(
+        "teg-n20-d1",
+        [_case("q001", 8), *[_case(f"q{index:03d}", 9) for index in range(2, 21)]],
+    )
+    _make_fixture(
+        "teg-n20-d3",
+        [
+            *[_case(f"q{index:03d}", 8) for index in range(1, 4)],
+            *[_case(f"q{index:03d}", 9) for index in range(4, 21)],
+        ],
+    )
+    _make_fixture(
+        "teg-n20-mix",
+        [_case(f"q{index:03d}", 8.9 if index <= 10 else 9.1) for index in range(1, 21)],
+    )
+    _make_fixture(
+        "teg-auto-a",
+        [_case(f"q{index:03d}", 9) for index in range(1, 21)],
+        created_at="2026-11-23T03:00:00",
+    )
+    _make_fixture(
+        "teg-auto-b",
+        [_case(f"q{index:03d}", 8.5) for index in range(1, 21)],
+        created_at="2026-11-23T03:01:00",
+    )
+    _make_fixture(
+        "teg-unique-sha",
+        [_case(f"q{index:03d}", 9) for index in range(1, 21)],
+        dataset_sha="teg-unique-sha",
+        created_at="2026-11-23T00:02:00",
+    )
+    _make_fixture(
+        "teg-n2-base",
+        [_case("q001", 9), _case("q002", 9)],
+        created_at="2026-11-23T00:00:30",
+    )
+    _make_fixture(
+        "teg-n2-cand",
+        [_case("q001", 8), _case("q002", 9)],
+        created_at="2026-11-23T00:00:31",
+    )
+    _make_fixture(
+        "teg-unit-base",
+        [_case(f"q{index:03d}", 0.8) for index in range(1, 21)],
+        created_at="2026-11-23T00:00:32",
+    )
+    _make_fixture(
+        "teg-unit-cand",
+        [_case("q001", 0.7), *[_case(f"q{index:03d}", 0.8) for index in range(2, 21)]],
+        created_at="2026-11-23T00:00:33",
+    )
+    _make_fixture(
+        "teg-other-dataset",
+        [_case(f"q{index:03d}", score) for index, score in enumerate(base_scores, 1)],
+        dataset_sha="teg-other-sha",
+        created_at="2026-11-23T00:00:40",
     )
 
 
