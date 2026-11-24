@@ -34,6 +34,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -140,6 +141,19 @@ class FakeResponse:
         pass
 
 
+class SlowFakeResponse(FakeResponse):
+    """逐行慢速吐帧，模拟「拒绝后 resume 续写」的真实耗时（实测首 token 25.3s、全文 3095 字）。"""
+
+    def __init__(self, lines: list[str], status_code: int = 200, delay: float = 0.05) -> None:
+        super().__init__(lines, status_code)
+        self.delay = delay
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            await asyncio.sleep(self.delay)
+            yield line
+
+
 class FakeClient:
     """直接传给 _stream_conversation 的最小 httpx.AsyncClient 替身。"""
 
@@ -153,14 +167,24 @@ class FakeClient:
 
 
 class FakeAsyncClient(FakeClient):
-    """满足 `async with httpx.AsyncClient(...) as client:` 的替身。"""
+    """满足 `async with httpx.AsyncClient(...) as client:` 的替身。
+
+    响应队列是**跨实例共享**的（类属性），按真实调用顺序先进先出：
+    拒绝路径会额外起一个后台 client 消费 resume 流，若每个实例各复制一份队列，
+    同一个 interrupt/续写帧会被重复投喂，用例就失去意义。
+    """
 
     responses: list[FakeResponse] = []
     instances: list[FakeAsyncClient] = []
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(FakeAsyncClient.responses)
+        super().__init__([])
         FakeAsyncClient.instances.append(self)
+
+    def stream(self, method: str, url: str, json: dict | None = None) -> FakeResponse:
+        self.calls.append({"method": method, "url": url, "json": json})
+        assert FakeAsyncClient.responses, f"没有预置响应了: {method} {url}"
+        return FakeAsyncClient.responses.pop(0)
 
     async def __aenter__(self) -> FakeAsyncClient:
         return self
@@ -219,8 +243,18 @@ def _reset() -> None:
     app.APPROVAL_TIMEOUT_SECONDS = _ORIG_TIMEOUT
 
 
-def _run_drive(message: str = "需要深度调研") -> None:
-    asyncio.run(app._on_conversation_message(FakeMessage(message)))
+def _run_drive(message: str = "需要深度调研", *, drain: bool = True) -> float:
+    """驱动一轮会话；返回本轮（不含后台 resume 收尾）耗时，便于断言"没有被阻塞"。"""
+
+    async def _go() -> float:
+        started = time.monotonic()
+        await app._on_conversation_message(FakeMessage(message))
+        elapsed = time.monotonic() - started
+        if drain:
+            await app._wait_all_pending_resumes(timeout=5.0)
+        return elapsed
+
+    return asyncio.run(_go())
 
 
 async def _consume(lines: list[str]) -> tuple[Any, Any, Any]:
@@ -817,6 +851,79 @@ def check_c3c_duplicate_reuse() -> str:
     )
 
 
+def check_a9_reject_then_next_message() -> str:
+    """S3 缺陷复现/回归：拒绝后立刻发下一条消息。
+
+    真实后端实测：拒绝后 resume 还要跑 25~40s（首 token 25.3s、全文 3095 字），
+    旧实现同步 await 整条流 → 整轮一直 running；Chainlit 2.12 在 running 期间
+    禁用输入框提交（MessageComposer.submit() 命中 disabled 直接 return），
+    用户"立刻"发的那句话既不入消息列表也不 emit，而后端续写被渲染成
+    "无缘无故的回答"。本用例断言修复后的三条不变量：
+      1. 拒绝路径不再被续写阻塞（本轮 < 1.5s 返回）；
+      2. 续写内容不渲染进对话流（不伪造回答）；
+      3. 下一条消息只发 1 次 /chat/conversation，且不需要人工补发用户气泡。
+    """
+    _reset()
+    app.cl.user_session = FakeUserSession(
+        {app.SESSION_THREAD_ID: "tid-9", app.SESSION_USER_NAME: "developer"}
+    )
+    continuation = [
+        "data: " + json.dumps({"type": "token", "content": "续写报告"}, ensure_ascii=False)
+        for _ in range(60)
+    ]
+    FakeAsyncClient.responses = [
+        FakeResponse(_sse({"type": "interrupt", "data": INTERRUPT_DATA})),
+        # 拒绝后的 resume：3s 才吐完的续写（≈0.05s × 60 行）
+        SlowFakeResponse(continuation, delay=0.05),
+        FakeResponse(
+            _sse(
+                {"type": "token", "content": "我知道的是……"},
+                {"type": "final", "content": "我知道的是……"},
+            )
+        ),
+    ]
+    app.httpx.AsyncClient = FakeAsyncClient  # type: ignore[assignment]
+    FakeAskActionMessage.queue = [{"payload": {"value": app.APPROVAL_ACTION_REJECT}}]
+
+    next_text = "那你先说说你知道的"
+
+    async def _go() -> float:
+        started = time.monotonic()
+        await app._on_conversation_message(FakeMessage("帮我做一份深度调研"))
+        elapsed = time.monotonic() - started
+        # 拒绝后立刻发下一条（此刻后台 resume 还在续写）
+        await app._on_conversation_message(FakeMessage(next_text))
+        await app._wait_all_pending_resumes(timeout=10.0)
+        return elapsed
+
+    elapsed = asyncio.run(_go())
+
+    # 1) 拒绝路径不再被续写阻塞
+    assert elapsed < 1.5, f"拒绝路径仍被 resume 续写阻塞: {elapsed:.2f}s"
+    # 2) 续写不渲染：对话流里没有"续写报告"
+    blob = " ".join(m.content for m in SENT_MESSAGES)
+    assert "续写报告" not in blob, "拒绝后的续写内容被渲染成了回答（应只消费不渲染）"
+    # 3) 拒绝只弹 1 张卡、只发 1 次 resume(reject)
+    assert len(_approval_cards()) == 1, f"拒绝路径弹了 {len(_approval_cards())} 张卡"
+    resumes = _resume_calls()
+    assert len(resumes) == 1, f"拒绝路径 resume 次数不是 1: {resumes!r}"
+    assert resumes[0]["json"]["decision"] == "reject", f"decision 不是 reject: {resumes[0]!r}"
+    # 4) 下一条消息恰好 1 次 /chat/conversation，且带给后端的是用户原话
+    convs = [c for c in _all_calls() if "/resume" not in c["url"]]
+    assert len(convs) == 2, f"/chat/conversation 次数不是 2（两轮各 1）: {convs!r}"
+    assert convs[-1]["json"]["message"] == next_text, f"新消息请求体不对: {convs[-1]['json']!r}"
+    # 5) 不靠人工补发用户气泡：前端不得伪造 author=User 的消息
+    forged = [m for m in SENT_MESSAGES if getattr(m, "author", "") == "User"]
+    assert not forged, f"前端伪造了 {len(forged)} 条用户消息（Chainlit 已自行渲染）"
+    assert any("已拒绝执行" in m.content for m in SENT_MESSAGES), "拒绝后没有可读提示"
+    # 6) 新消息的回答正常渲染
+    assert "我知道的是" in blob, "新消息的回答没有渲染"
+    return (
+        f"拒绝路径 {elapsed:.2f}s 返回（未被续写阻塞）；续写未渲染；"
+        f"新消息恰 1 次 /chat/conversation（message={next_text}）；无伪造用户气泡"
+    )
+
+
 CHECKS: list[tuple[str, str, Any]] = [
     ("TDM-A1a", "模式开关默认 deep_research + conversation 分流", check_a1a_mode_switch),
     ("TDM-A1b", "conversation 请求体 user_id 回退", check_a1b_request_body),
@@ -839,6 +946,7 @@ CHECKS: list[tuple[str, str, Any]] = [
     ("TDM-C3", "同 approval_id 卡片去重", check_c3_duplicate_card),
     ("TDM-C3b", "不同 approval_id 各一张卡", check_c3b_distinct_approvals),
     ("TDM-C3c", "重复帧忽略 / reject 超时各 1 次 resume", check_c3c_duplicate_reuse),
+    ("TDM-A9", "拒绝后立刻发新消息不丢（S3 回归）", check_a9_reject_then_next_message),
 ]
 
 

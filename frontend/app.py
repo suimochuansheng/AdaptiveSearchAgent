@@ -687,6 +687,176 @@ async def _resume_conversation(
         return "resumed", next_interrupt, output_msg, step
 
 
+# ── 拒绝/超时后的 resume：后台消费，不占用用户轮次 ────────────────
+# 背景（2026-11-24 缺陷 S3）：拒绝后 resume 会让图按 reject 分支继续跑，后端要
+# 25~40 秒才吐完（实测：首 token 25.3s、全文 3095 字）。旧实现同步 await 整条流，
+# 整轮一直处于 running；Chainlit 2.12 在 running 期间禁用输入框提交
+# （MessageComposer.submit() 命中 disabled 直接 return，消息既不入列表也不 emit），
+# 于是用户"拒绝后立刻"发的那句话在对话流里消失，而后端的续写报告被渲染成
+# "无缘无故的回答"。现在：拒绝只等 HTTP 状态（毫秒级），SSE 续写放后台消费且
+# 不渲染；本轮立即结束 → 输入框立即可用。下一条消息发出前先等后台收尾，
+# 避免撞上后端的"会话正在执行中"(429)。
+PENDING_RESUME_WAIT_SECONDS = 120.0
+_RESUME_STATUS_TIMEOUT = 15.0
+_REJECT_DRAIN_HINT_SECONDS = 3.0
+_PENDING_RESUMES: dict[str, asyncio.Task] = {}
+
+
+def _resolve_resume_status(status_fut: asyncio.Future[str], value: str) -> None:
+    """给等待 HTTP 状态的 future 填值（只填一次）。"""
+    if not status_fut.done():
+        status_fut.set_result(value)
+
+
+def _pending_resume_task(thread_id: str) -> asyncio.Task | None:
+    """取该 thread 尚未收尾的后台 resume；已完成的任务顺手清掉并吞掉异常。"""
+    task = _PENDING_RESUMES.get(thread_id)
+    if task is None:
+        return None
+    if not task.done():
+        return task
+    _PENDING_RESUMES.pop(thread_id, None)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("后台 resume 收尾失败: %s", task.exception())
+    return None
+
+
+async def _drain_resume_frames(response: httpx.Response) -> dict | None:
+    """只消费 SSE、不渲染，返回中途出现的下一次中断（仅用于日志）。
+
+    与 `_consume_conversation_frames` 的区别：这里不创建/更新任何 cl.Message 或
+    cl.Step，拒绝后的续写内容既不进对话流，也不影响 token/final 去重逻辑。
+    """
+    leftover: dict | None = None
+    async for line in response.aiter_lines():
+        if not line.startswith("data: "):
+            continue
+        try:
+            event = json.loads(line[6:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(event, dict) and event.get("type") == "interrupt":
+            data = event.get("data")
+            leftover = data if isinstance(data, dict) else {}
+    return leftover
+
+
+async def _drain_reject_resume(
+    thread_id: str,
+    interrupt_data: dict,
+    decision: str,
+    status_fut: asyncio.Future[str],
+) -> None:
+    """后台把拒绝/超时的 resume 送到结束（不渲染、不抛给用户轮次）。"""
+    body = _build_resume_body(interrupt_data, decision)
+    url = f"{FASTAPI_BASE_URL}{CONVERSATION_ENDPOINT}/{thread_id}/resume"
+    try:
+        # 与其它写法的嵌套 with 保持一致：这里不能用多上下文合并，
+        # 因为 body 的流式读取必须在 client 存活期内完成。
+        async with httpx.AsyncClient(  # noqa: SIM117 —— 流式读取必须活在 client 作用域内
+            timeout=httpx.Timeout(300.0, connect=10.0)
+        ) as client:
+            async with client.stream("POST", url, json=body) as response:
+                status = response.status_code
+                if status in (404, 405):
+                    _resolve_resume_status(status_fut, "unavailable")
+                    return
+                if status == 409:
+                    _resolve_resume_status(status_fut, "conflict")
+                    return
+                if status == 410:
+                    _resolve_resume_status(status_fut, "expired")
+                    return
+                response.raise_for_status()
+                _resolve_resume_status(status_fut, "resumed")
+                leftover = await _drain_resume_frames(response)
+                if leftover:
+                    logger.warning(
+                        "拒绝后仍出现审批中断，已跳过（不渲染）: approval_id=%s",
+                        leftover.get("approval_id"),
+                    )
+    except Exception:  # noqa: BLE001 —— 后台任务不能把异常抛回用户轮次
+        _resolve_resume_status(status_fut, "error")
+        logger.exception("后台 resume 失败")
+    finally:
+        if _PENDING_RESUMES.get(thread_id) is asyncio.current_task():
+            _PENDING_RESUMES.pop(thread_id, None)
+
+
+async def _submit_reject_resume(thread_id: str, interrupt_data: dict, decision: str) -> str:
+    """提交拒绝/超时的 resume 到后台，只等 HTTP 状态，不等续写。
+
+    Returns:
+        resumed / unavailable / conflict / expired / error。
+    """
+    loop = asyncio.get_running_loop()
+    status_fut: asyncio.Future[str] = loop.create_future()
+    task = asyncio.create_task(
+        _drain_reject_resume(thread_id, interrupt_data, decision, status_fut)
+    )
+    _PENDING_RESUMES[thread_id] = task
+    try:
+        return await asyncio.wait_for(asyncio.shield(status_fut), timeout=_RESUME_STATUS_TIMEOUT)
+    except TimeoutError:
+        logger.warning(
+            "resume 未在 %.0fs 内返回状态，按已提交处理: thread_id=%s",
+            _RESUME_STATUS_TIMEOUT,
+            thread_id,
+        )
+        return "resumed"
+
+
+async def _report_resume_state(state: str) -> None:
+    """拒绝/超时路径的 resume 结果提示：只在 404/409/410 时提示。"""
+    if state == "unavailable":
+        await cl.Message(content=RESUME_DISABLED_MESSAGE).send()
+    elif state == "conflict":
+        await cl.Message(content="⚠️ 该审批已被处理或重复提交（409），请重新发起。").send()
+    elif state == "expired":
+        await cl.Message(content="⏰ 审批已过期（410），请重新发起。").send()
+
+
+async def _wait_pending_resume(thread_id: str) -> None:
+    """本轮发请求前先等上一轮「拒绝」的后台收尾，避免后端 429（会话正忙）。
+
+    为什么必须等：后端拒绝分支仍在跑图（锁未释放），此时 POST /chat/conversation
+    会被判 "该会话正在执行中" 并返回 429。等待期间用户消息已由前端即时渲染，
+    所以对话流不会缺消息。
+    """
+    task = _pending_resume_task(thread_id)
+    if task is None:
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=_REJECT_DRAIN_HINT_SECONDS)
+        return
+    except TimeoutError:
+        pass
+
+    hint = cl.Message(content="⏳ 上一轮「已拒绝」仍在收尾，本条消息排队稍候…")
+    await hint.send()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=PENDING_RESUME_WAIT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "后台 resume 超过 %.0fs 仍未收尾: thread_id=%s",
+            PENDING_RESUME_WAIT_SECONDS,
+            thread_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    hint.content = "▶️ 上一轮已收尾，开始处理本条消息。"
+    await hint.update()
+
+
+async def _wait_all_pending_resumes(timeout: float = 5.0) -> None:
+    """等所有后台 resume 收尾（测试/退出用，避免事件循环关闭时残留任务）。"""
+    tasks = [task for task in _PENDING_RESUMES.values() if not task.done()]
+    _PENDING_RESUMES.clear()
+    if not tasks:
+        return
+    await asyncio.wait(tasks, timeout=timeout)
+
+
 def _register_approval(interrupt_data: dict, shown: set[str]) -> bool:
     """登记已展示的 approval_id：首次返回 True；重复帧记日志后返回 False。
 
@@ -715,6 +885,12 @@ async def _on_conversation_message(message: cl.Message) -> None:  # noqa: C901 -
     # 契约要求 user_id 非空：会话里没有用户名时也回退成 thread_id，
     # 保证真实请求体里 user_id 永远不是 null。
     user_id = str(user_id or thread_id)
+
+    # 上一轮「拒绝」的 resume 可能还在后端跑（图未结束、锁未释放）：
+    # 先等它收尾，保证本条消息只发 1 次 /chat/conversation 且不撞 429。
+    # 等待期间用户消息已由前端即时渲染，对话流不会缺消息。
+    await _wait_pending_resume(str(thread_id))
+
     output_msg: cl.Message | None = None
     step: cl.Step | None = None
 
@@ -755,16 +931,13 @@ async def _on_conversation_message(message: cl.Message) -> None:  # noqa: C901 -
                     await cl.Message(content="🙅 已拒绝执行，本次调用未被发起。").send()
                     # 拒绝也必须走 resume：把 decision 送回后端消费凭据并让图按
                     # reject 分支继续；否则会话停在 interrupted，下一条消息 409。
-                    state, interrupt_data, output_msg, step = await _resume_conversation(
-                        thread_id=thread_id,
-                        interrupt_data=interrupt_data,
-                        decision=APPROVAL_ACTION_REJECT,
-                        client=client,
-                        output_msg=output_msg,
-                        step=step,
+                    # 但**不阻塞本轮**：只等 HTTP 状态，续写放后台消费且不渲染，
+                    # 这样拒绝后输入框立刻可用，用户下一句一定能出现在对话流里。
+                    state = await _submit_reject_resume(
+                        str(thread_id), interrupt_data, APPROVAL_ACTION_REJECT
                     )
-                    if state != "resumed":
-                        break
+                    await _report_resume_state(state)
+                    break
                 else:
                     # 超时：按 reject 处理，同样走 resume 消费凭据，避免卡在 interrupted
                     await cl.Message(
@@ -773,16 +946,11 @@ async def _on_conversation_message(message: cl.Message) -> None:  # noqa: C901 -
                             "已自动拒绝，本次调用未被发起。"
                         )
                     ).send()
-                    state, interrupt_data, output_msg, step = await _resume_conversation(
-                        thread_id=thread_id,
-                        interrupt_data=interrupt_data,
-                        decision=APPROVAL_ACTION_REJECT,
-                        client=client,
-                        output_msg=output_msg,
-                        step=step,
+                    state = await _submit_reject_resume(
+                        str(thread_id), interrupt_data, APPROVAL_ACTION_REJECT
                     )
-                    if state != "resumed":
-                        break
+                    await _report_resume_state(state)
+                    break
 
         except httpx.HTTPStatusError as exc:
             await _write_error(f"后端错误 (HTTP {exc.response.status_code})", output_msg)
