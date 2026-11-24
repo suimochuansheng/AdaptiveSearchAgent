@@ -19,17 +19,28 @@ CI 没有模型凭据，**不跑 `evals/run.py`**；`.github/workflows/eval-gate
 
 ## 2. 判据原文与来历
 
-> `candidate - baseline` 落在 ±记录方差（默认 **0.0408**）内为 `PASS`；
-> 低于 `-方差` 为 `FAIL_DEGRADED`；高于 `+方差` 为 `WARN_IMPROVED`。
+> 有效阈值 = max(记录方差，单题当量)；
+> 单题当量 = score_step / n_cases；默认 score_step=1.0，n_cases 取 meta.dataset_size。
+> `candidate - baseline` 落在 ±有效阈值内为 `PASS`；
+> 低于 `-有效阈值` 为 `FAIL_DEGRADED`；高于 `+有效阈值` 为 `WARN_IMPROVED`。
 
-- `0.0408` 来自 `docs/baseline.md` §4：Ragas `faithfulness` 同口径两次实测
-  `0.8509` / `0.8101`，差 `0.0408`，取三项指标里最大的实测差作为记录方差；
-- 门禁**不发明新阈值**，也**不按单题分数下降判失败**：单题只做归因，判定看均值；
+- 记录方差 `0.0408` 来自 `docs/baseline.md` §4：Ragas `faithfulness` 同口径两次实测
+  `0.8509` / `0.8101`，差 `0.0408`；
+- **为什么阈值不能小于单题当量**：20 题时单题当量 = 1/20 = **0.05**，而 0.0408 < 0.05。
+  若直接拿 0.0408 当阈值，“净降 1 题”（delta = -0.05）必然 FAIL，这是算术上的假阳性。
+  所以有效阈值取 `max(0.0408, 0.05) = 0.05`；净降 1 题 PASS，净降 3 题（-0.15）仍 FAIL；
+- 今天实测 A 同配置两次：均值差 0.0000，逐题 2 升 / 2 降 / 16 不变；
+  B/C 相对 A 的 -0.05 正是“净 1 题”，在旧阈值下会被误判为 `FAIL_DEGRADED`；
+- `score_step` 从 per_case 分数差推最小正步长，推不出用 1.0；`n_cases` 优先取
+  `meta.dataset_size`（全量题数），缺省用共同题数；
+- **逐题抖动只进报告，不进判定**：`flips={up,down,unchanged}` + 双侧符号检验
+  `p=2*sum_{i<=min(up,down)} C(n,i)/2^n`；p 文本用于判断“变化是否像随机抖动”，
+  不改变三态结论；
 - 三态含义：
-  - `PASS`：变化在记录噪声内，同口径无漂移；
-  - `WARN_IMPROVED`：提升超出记录噪声，**不直接放行**，需人工复核（可能是工具未触发 /
+  - `PASS`：变化在有效阈值内，同口径无漂移；
+  - `WARN_IMPROVED`：提升超出有效阈值，**不直接放行**，需人工复核（可能是工具未触发 /
     裁判漂移 / 答案变短），CLI 退出码 0 但报告保留 WARN；
-  - `FAIL_DEGRADED`：退化超出记录噪声，CLI 退出码 1；
+  - `FAIL_DEGRADED`：退化超出有效阈值，CLI 退出码 1；
 - CLI：`PASS` / `WARN_IMPROVED` -> 0，`FAIL_DEGRADED` -> 1，输入不合法 -> 2；
 - **有效性守卫**：任一侧 `valid_for_quality=false` 默认拒绝（退出码 2）；
   确需对比加 `--allow-invalid-baseline` / `--allow-invalid-candidate`，结果带 `quality_warning`；
@@ -39,7 +50,7 @@ CI 没有模型凭据，**不跑 `evals/run.py`**；`.github/workflows/eval-gate
 - **代码版本**：两 run 的 `git_commit` 不同时 `code_version_changed=true`；退出码不变，
   但报告顶部提示“分数差异不能归因于配置开关”，且 |delta| 超方差时 reason 改为
   “含代码版本差异，无法归因，需同版本复跑”；
-- 少于 2 道共同有效题、方差 <= 0、per_case 缺字段都直接给可读错误（退出码 2），不猜。
+- 少于 2 道共同有效题、方差为负、步长非正、per_case 缺字段都直接给可读错误（退出码 2），不猜。
 
 ## 3. 怎么跑
 
@@ -67,6 +78,8 @@ python -m evals.run --configs A,B --compare last
 # 4) 只看门禁（退出码 0=PASS/WARN / 1=FAIL_DEGRADED / 2=输入不合法）
 python -m evals.gate --baseline <run_id|path> --candidate <run_id|path>
 python -m evals.gate --compare last
+# 自动找同 config/同 commit/同数据集的重复 run，用均值差绝对值当方差
+python -m evals.gate --baseline <run> --candidate <run> --variance auto
 # 明确放行无效 run / 题集不一致（结果会带 quality_warning / compared_cases / skipped）
 python -m evals.gate --baseline <run> --candidate <run> \
   --allow-invalid-baseline --allow-invalid-candidate --allow-partial
@@ -109,8 +122,12 @@ python -m evals.backfill \
 - **单裁判**：所有分数来自 `EVAL_JUDGE_MODEL`，换裁判则不可横比（meta 记录 judge_model）；
 - **20 题样本小**：单题 ±1 分就能让均值动 0.05，因此门禁只看均值差，单题只归因；
 - **CI 不跑真模型**：门禁只能证明逻辑正确，不能证明本次线上质量；
-- **0.0408 来自 Ragas（0~1 指标）**，迁到 1~10 分 judge 上非常紧；
-  超出阈值先看裁判波动 / 环境，再谈退化；
+- **0.0408 来自 Ragas（0~1 指标）**；但 20 题时单题当量 0.05 更大，所以有效阈值是 0.05。
+  低于单题当量的阈值会把“净 1 题”误判为退化，已被本补丁修正；
+- **逐题抖动是证据不是判据**：2 升 2 降的符号检验 p=1.00，说明变化更像噪声；
+  但报告仍会列出逐题下降项，供人工归因；
+- `--variance 0` 合法：记录方差为 0 时有效阈值退化为单题当量；负数方差仍然拒绝；
+- `score_step` 默认 1.0；整数 1~10 分 judge 推出来就是 1.0，换 0~1 指标时建议显式传步长；
 - `latency_ms` / `tokens` 来自现有 SSE；`tokens` 在会话端点没有 kpi 帧时为 `null`，
   报告不据此判定；
 - 门禁只比较**共同有效题**：某题候选失败（无分数）不计入均值，但会在失败清单里归因；

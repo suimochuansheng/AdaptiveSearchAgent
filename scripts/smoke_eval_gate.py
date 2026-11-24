@@ -28,7 +28,10 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
@@ -39,6 +42,7 @@ from evals.gate import GateInputError, Run  # noqa: E402
 
 _STAMP = time.strftime("%Y%m%d-%H%M%S")
 _CASE_IDS = ("q001", "q002", "q003")
+_TWENTY_IDS = tuple(f"q{i:03d}" for i in range(1, 21))
 
 LINK_ONLY_WARNING = "⚠️ 本次为链路验证 run，环境未就绪，分数不可用于质量结论"
 
@@ -69,7 +73,7 @@ def _case(
 
 def _make_run(
     run_id: str,
-    scores: list[float | None],
+    scores: Sequence[float | None],
     *,
     drop_tools: bool = False,
     valid_for_quality: bool = True,
@@ -216,14 +220,17 @@ def check_invalid_report(base: Run) -> str:
     return "链路验证警告已写入 report.md 顶部"
 
 
-def check_zero_variance(base: Run, candidate: Run) -> str:
-    try:
-        gate.compare(base, candidate, variance=0)
-    except GateInputError as exc:
-        text = str(exc)
-        _assert("方差" in text, f"错误信息应提到方差：{text}")
-        return text
-    raise SmokeFailure("方差为 0 时应给可读错误，实际通过了比较")
+def check_zero_variance(base: Run) -> str:
+    result = gate.compare(base, base, variance=0)
+    _assert(
+        result.recorded_variance == 0, f"recorded_variance 应为 0，实际 {result.recorded_variance}"
+    )
+    _assert(
+        result.threshold_used == result.one_case_weight,
+        f"方差 0 时有效阈值应取单题当量，实际 {result.threshold_used}",
+    )
+    _assert(result.status == "PASS", f"零差值应 PASS，实际 {result.status}")
+    return f"方差 0 -> 有效阈值 {result.threshold_used:.4f}（单题当量）"
 
 
 def check_single_case(base: Run) -> str:
@@ -258,6 +265,49 @@ def check_missing_field(base: Run) -> str:
             f"缺字段应给 GateInputError，实际崩溃：{type(exc).__name__}: {exc}"
         ) from exc
     raise SmokeFailure("缺字段时应给可读错误，实际通过了比较")
+
+
+def check_net_one_case_down() -> str:
+    base = _make_run(f"{_STAMP}-fixture-20-base", [9.0] * 20, case_ids=_TWENTY_IDS)
+    candidate = _make_run(f"{_STAMP}-fixture-20-down1", [9.0] * 19 + [8.0], case_ids=_TWENTY_IDS)
+    result = gate.compare(base, candidate)
+    _assert(result.status == "PASS", f"净降 1 题应 PASS，实际 {result.status}")
+    _assert(
+        abs(result.threshold_used - 0.05) < 1e-9,
+        f"有效阈值应为 0.05，实际 {result.threshold_used}",
+    )
+    _assert("1.0 题当量" in result.reason, f"reason 缺题当量：{result.reason}")
+    _assert("符号检验" in result.reason, f"reason 缺符号检验：{result.reason}")
+    return f"PASS，delta={result.delta:+.4f}，阈值={result.threshold_used:.4f}"
+
+
+def check_net_three_case_down() -> str:
+    base = _make_run(f"{_STAMP}-fixture-20-base3", [9.0] * 20, case_ids=_TWENTY_IDS)
+    candidate = _make_run(
+        f"{_STAMP}-fixture-20-down3", [9.0] * 17 + [8.0] * 3, case_ids=_TWENTY_IDS
+    )
+    result = gate.compare(base, candidate)
+    _assert(result.status == "FAIL_DEGRADED", f"净降 3 题应 FAIL_DEGRADED，实际 {result.status}")
+    _assert(result.delta == -0.15, f"delta 应为 -0.15，实际 {result.delta}")
+    return f"FAIL_DEGRADED，delta={result.delta:+.4f}，阈值={result.threshold_used:.4f}"
+
+
+def check_flip_evidence() -> str:
+    base = _make_run(f"{_STAMP}-fixture-flip-base", [9.0] * 20, case_ids=_TWENTY_IDS)
+    scores = [10.0, 10.0, 8.0, 8.0] + [9.0] * 16
+    candidate = _make_run(f"{_STAMP}-fixture-flip", scores, case_ids=_TWENTY_IDS)
+    result = gate.compare(base, candidate)
+    _assert(result.status == "PASS", f"净 0 应 PASS，实际 {result.status}")
+    _assert(result.flips == {"up": 2, "down": 2, "unchanged": 16}, f"flips 错误：{result.flips}")
+    _assert(result.sign_test_p == 1.0, f"符号检验 p 应为 1.00，实际 {result.sign_test_p}")
+    _assert("2 升 / 2 降 / 16 不变" in result.reason, f"reason 缺抖动：{result.reason}")
+    _assert("符号检验 p=1.00" in result.reason, f"reason 缺 p 值：{result.reason}")
+    text = report.write_markdown(candidate.run_id, result).read_text(encoding="utf-8")
+    _assert("单题当量：0.0500" in text, "报告缺单题当量行")
+    _assert("有效阈值：0.0500" in text, "报告缺有效阈值行")
+    _assert("逐题抖动：升 2 / 降 2 / 不变 16" in text, "报告缺逐题抖动行")
+    _assert("符号检验 p=1.00" in text, "报告缺符号检验 p 值")
+    return "PASS，flips=2/2/16，p=1.00，报告已呈现"
 
 
 def check_probe_failure() -> str:
@@ -429,8 +479,11 @@ def main(argv: list[str] | None = None) -> int:
         ("零差值 -> reason 写无差异", lambda: check_zero_delta(base)),
         ("非全量 run -> meta.partial/publishable + report 警告", lambda: check_partial_run(base)),
         ("代码版本不同 -> code_version_changed + report 提示", lambda: check_code_version(base)),
+        ("净降 1 题（delta=-0.05, n=20）-> PASS", check_net_one_case_down),
+        ("净降 3 题（delta=-0.15）-> FAIL_DEGRADED", check_net_three_case_down),
+        ("2 升 2 降 -> PASS + 符号检验证据", check_flip_evidence),
         ("探活失败 -> 退出码 2", lambda: check_probe_failure()),
-        ("边界：方差为 0 -> 可读错误", lambda: check_zero_variance(base, base)),
+        ("边界：方差为 0 -> 阈值取单题当量", lambda: check_zero_variance(base)),
         ("边界：只有 1 题 -> 可读错误", lambda: check_single_case(base)),
         ("边界：per_case 缺 score -> 可读错误", lambda: check_missing_field(base)),
     ]

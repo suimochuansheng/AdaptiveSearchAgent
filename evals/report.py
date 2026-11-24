@@ -155,7 +155,7 @@ def _meta_section(run: Run, report_path: Path) -> list[str]:
     return lines
 
 
-def _matrix_section(candidate: Run) -> list[str]:
+def _matrix_section(candidate: Run, result: GateResult | None = None) -> list[str]:
     lines = [
         "## 2. 配置矩阵分数表",
         "",
@@ -171,6 +171,22 @@ def _matrix_section(candidate: Run) -> list[str]:
             f"| {_cell(run.meta.get('created_at'))} | {_mean_text(run)} "
             f"| {_variance_text(run)} | {scored}/{len(run.per_case)} |"
         )
+    lines.append("")
+    if result is None:
+        lines.append("单题当量：— ｜ 有效阈值：—（无对比基线）")
+        lines.append("逐题抖动：—")
+        return lines
+    significance = "不显著" if result.sign_test_p > 0.05 else "显著"
+    lines.append(
+        f"单题当量：{result.one_case_weight:.4f} ｜ "
+        f"有效阈值：{result.threshold_used:.4f}"
+        f"（方差 {result.recorded_variance:.4f} 与当量取大）"
+    )
+    lines.append(
+        f"逐题抖动：升 {result.flips.get('up', 0)} / 降 {result.flips.get('down', 0)} / "
+        f"不变 {result.flips.get('unchanged', 0)} ｜ "
+        f"符号检验 p={result.sign_test_p:.2f}（{'<=0.05' if not result.sign_test_p > 0.05 else '>0.05'}，{significance}）"
+    )
     return lines
 
 
@@ -292,7 +308,7 @@ def write_markdown(run_id: str, compare_result: GateResult | None) -> Path:
     ]
     lines += _meta_section(run, report_path)
     lines += [""]
-    lines += _matrix_section(run)
+    lines += _matrix_section(run, compare_result)
     lines += [""]
     lines += _diff_section(compare_result)
     lines += [""]

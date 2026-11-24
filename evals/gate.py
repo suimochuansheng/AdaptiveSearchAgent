@@ -49,8 +49,9 @@ ATTRIBUTION_LABELS = ("工具未调用", "答案退化", "超时", "报错")
 
 #: 判据原文（报告里原样引用）。
 CRITERION = (
-    "candidate - baseline 落在 ±记录方差内为 PASS；"
-    "低于 -方差为 FAIL_DEGRADED；高于 +方差为 WARN_IMPROVED"
+    "candidate - baseline 落在 ±有效阈值内为 PASS；"
+    "有效阈值 = max(记录方差, 单题当量)；"
+    "低于 -有效阈值为 FAIL_DEGRADED；高于 +有效阈值为 WARN_IMPROVED"
 )
 
 GateStatus = Literal["PASS", "WARN_IMPROVED", "FAIL_DEGRADED"]
@@ -93,6 +94,14 @@ class GateResult:
     candidate_mean: float
     delta: float
     threshold: float
+    score_step: float
+    n_cases: int
+    recorded_variance: float
+    one_case_weight: float
+    threshold_used: float
+    delta_in_cases: float
+    flips: Mapping[str, int]
+    sign_test_p: float
     common_cases: int
     compared_cases: int
     skipped: int
@@ -228,19 +237,45 @@ def _attribute(
     return "", ""
 
 
-def _resolve_threshold(baseline: Run, variance: float | None) -> float:
-    """判据阈值：显式参数 > baseline.meta > 0.0408；必须为正。"""
+def _resolve_variance(baseline: Run, variance: float | None) -> float:
+    """记录方差：显式参数 > baseline.meta > 0.0408；允许 0（有效阈值另有下限）。"""
     raw: Any = variance
     if raw is None:
         raw = baseline.meta.get("recorded_variance", DEFAULT_RECORDED_VARIANCE)
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         raise GateInputError(f"记录方差必须是数字，实际 {raw!r}")
-    threshold = max(float(raw), 0.0)
-    if not math.isfinite(threshold) or threshold <= 0:
-        raise GateInputError(
-            f"记录方差必须 > 0，实际 {raw!r}；方差为 0 时任何噪声都会被判失败，判据无判别力"
-        )
-    return threshold
+    value = float(raw)
+    if not math.isfinite(value) or value < 0:
+        raise GateInputError(f"记录方差必须 >= 0，实际 {raw!r}")
+    return value
+
+
+def _infer_score_step(evidence: Sequence[CaseEvidence]) -> float:
+    """从逐题分数差推最小步长；推不出时用默认 1.0。"""
+    diffs = [
+        abs(item.delta) for item in evidence if item.delta is not None and abs(item.delta) > 1e-12
+    ]
+    if not diffs:
+        return 1.0
+    step = min(diffs)
+    return step if step > 0 else 1.0
+
+
+def _sign_test_p(up: int, down: int) -> float:
+    """双侧符号检验：H0 升/降等概率；p=2*sum_{i<=min(up,down)} C(n,i)/2^n。"""
+    n = up + down
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, i) for i in range(min(up, down) + 1))
+    return min(1.0, 2.0 * tail / (2.0**n))
+
+
+def _dataset_case_count(baseline: Run, fallback: int) -> int:
+    """单题当量里的 n：优先 meta.dataset_size（全量题数），否则共同题数。"""
+    raw = baseline.meta.get("dataset_size")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+        return raw
+    return fallback
 
 
 def _guard_quality(
@@ -314,6 +349,7 @@ def compare(
     candidate: Run,
     variance: float | None = None,
     *,
+    score_step: float | None = None,
     allow_invalid_baseline: bool = False,
     allow_invalid_candidate: bool = False,
     allow_partial: bool = False,
@@ -324,7 +360,8 @@ def compare(
         baseline: 基线 run。
         candidate: 候选 run。
         variance: 记录方差；None 时读 `baseline.meta["recorded_variance"]`，
-            再缺省用 0.0408。
+            再缺省用 0.0408；有效阈值还会取 max(方差, 单题当量)。
+        score_step: 分数步长；None 时从 per_case 分数差推断（推不出用 1.0）。
         allow_invalid_baseline: 允许 `valid_for_quality=false` 的基线继续比较。
         allow_invalid_candidate: 允许无效候选继续比较。
         allow_partial: 题集不一致时允许只比共同题。
@@ -334,7 +371,7 @@ def compare(
 
     Raises:
         GateInputError: 输入不合法（无效 run 未放行 / 题集不一致未放行 /
-            缺字段 / 共同题 < 2 / 方差非正）。
+            缺字段 / 共同题 < 2 / 方差为负 / 步长非正）。
     """
     _validate_run(baseline, "baseline")
     _validate_run(candidate, "candidate")
@@ -401,11 +438,31 @@ def compare(
     candidate_git = str(candidate.meta.get("git_commit") or "")
     code_version_changed = bool(baseline_git and candidate_git and baseline_git != candidate_git)
 
+    up = sum(1 for base, cand in common_scores if cand > base + 1e-12)
+    down = sum(1 for base, cand in common_scores if cand < base - 1e-12)
+    unchanged = len(common_scores) - up - down
+    flips = {"up": up, "down": down, "unchanged": unchanged}
+
     baseline_mean = sum(item[0] for item in common_scores) / len(common_scores)
     candidate_mean = sum(item[1] for item in common_scores) / len(common_scores)
     delta = candidate_mean - baseline_mean
-    threshold = _resolve_threshold(baseline, variance)
-    status, conclusion = _decide_status(delta, threshold, code_version_changed=code_version_changed)
+    recorded_variance = _resolve_variance(baseline, variance)
+    if score_step is None:
+        step = _infer_score_step(evidence)
+    else:
+        if isinstance(score_step, bool) or not isinstance(score_step, (int, float)):
+            raise GateInputError(f"score_step 必须是数字，实际 {score_step!r}")
+        step = float(score_step)
+    if not math.isfinite(step) or step <= 0:
+        raise GateInputError(f"score_step 必须为正数，实际 {step!r}")
+    n_cases = _dataset_case_count(baseline, compared_cases)
+    one_case_weight = step / n_cases
+    threshold_used = max(recorded_variance, one_case_weight)
+    delta_in_cases = delta / one_case_weight
+    sign_test_p = _sign_test_p(up, down)
+    status, conclusion = _decide_status(
+        delta, threshold_used, code_version_changed=code_version_changed
+    )
     passed = status != "FAIL_DEGRADED"
 
     failures = tuple(item for item in evidence if item.attribution)
@@ -413,7 +470,11 @@ def compare(
     for item in failures:
         counts[item.attribution] = counts.get(item.attribution, 0) + 1
 
-    comparison = f"candidate-baseline = {delta:+.4f}，记录方差 {threshold:.4f}"
+    comparison = (
+        f"delta={delta:+.4f}（candidate-baseline；净值 {abs(delta_in_cases):.1f} 题当量）；"
+        f"有效阈值 {threshold_used:.4f}（方差 {recorded_variance:.4f} 与单题当量 "
+        f"{one_case_weight:.4f} 取大）"
+    )
     failure_note = ""
     if failures:
         parts = [f"{label} {counts[label]}" for label in ATTRIBUTION_LABELS if counts.get(label)]
@@ -424,7 +485,12 @@ def compare(
             f"；仅比较共同题（compared_cases={compared_cases} / skipped={skipped}），"
             "结论不可跨版本比较"
         )
-    reason = f"{status}：{comparison}，{conclusion}{partial_note}{failure_note}"
+    significance = "不显著" if sign_test_p > 0.05 else "显著"
+    flip_note = (
+        f"；逐题 {up} 升 / {down} 降 / {unchanged} 不变，"
+        f"符号检验 p={sign_test_p:.2f}（{significance}）"
+    )
+    reason = f"{status}：{comparison}，{conclusion}{partial_note}{failure_note}{flip_note}"
 
     return GateResult(
         status=status,
@@ -434,7 +500,15 @@ def compare(
         baseline_mean=round(baseline_mean, 4),
         candidate_mean=round(candidate_mean, 4),
         delta=round(delta, 4),
-        threshold=threshold,
+        threshold=threshold_used,
+        score_step=step,
+        n_cases=n_cases,
+        recorded_variance=recorded_variance,
+        one_case_weight=one_case_weight,
+        threshold_used=threshold_used,
+        delta_in_cases=round(delta_in_cases, 4),
+        flips=flips,
+        sign_test_p=sign_test_p,
         common_cases=compared_cases,
         compared_cases=compared_cases,
         skipped=skipped,
@@ -465,6 +539,14 @@ def _print_result(result: GateResult, *, as_json: bool) -> None:
             "candidate_mean": result.candidate_mean,
             "delta": result.delta,
             "threshold": result.threshold,
+            "score_step": result.score_step,
+            "n_cases": result.n_cases,
+            "recorded_variance": result.recorded_variance,
+            "one_case_weight": result.one_case_weight,
+            "threshold_used": result.threshold_used,
+            "delta_in_cases": result.delta_in_cases,
+            "flips": result.flips,
+            "sign_test_p": result.sign_test_p,
             "common_cases": result.common_cases,
             "compared_cases": result.compared_cases,
             "skipped": result.skipped,
@@ -510,12 +592,78 @@ def _print_result(result: GateResult, *, as_json: bool) -> None:
     if result.code_version_changed:
         print(f"代码版本 : {result.baseline_git} vs {result.candidate_git}（含版本差异）")
     print(f"判据     : {result.criterion}")
-    print(f"证据     : delta={result.delta:+.4f} 阈值={result.threshold:.4f}")
+    print(
+        f"阈值     : 有效 {result.threshold_used:.4f}"
+        f"（方差 {result.recorded_variance:.4f} 与单题当量 {result.one_case_weight:.4f} 取大）"
+    )
+    print(f"证据     : delta={result.delta:+.4f}（{result.delta_in_cases:+.1f} 题当量）")
+    print(
+        f"逐题抖动 : 升 {result.flips.get('up', 0)} / 降 {result.flips.get('down', 0)} / "
+        f"不变 {result.flips.get('unchanged', 0)}，符号检验 p={result.sign_test_p:.2f}"
+    )
     for item in result.failures:
         base = "—" if item.baseline_score is None else f"{item.baseline_score:.2f}"
         cand = "—" if item.candidate_score is None else f"{item.candidate_score:.2f}"
         print(f"  [{item.attribution}] {item.case_id}: {base} -> {cand} | {item.detail}")
     print(result.reason)
+
+
+def _mean_score(run: Run) -> float | None:
+    scores = [
+        float(case["score"])
+        for case in run.per_case
+        if isinstance(case.get("score"), (int, float)) and not isinstance(case.get("score"), bool)
+    ]
+    return sum(scores) / len(scores) if scores else None
+
+
+def _auto_variance(baseline: Run, store_module: Any) -> float:
+    """同 config / 同 commit / 同数据集的重复 run：用均值差绝对值当方差。"""
+    config = baseline.meta.get("config_id")
+    git = baseline.meta.get("git_commit")
+    sha = baseline.meta.get("dataset_sha256")
+    candidates = [
+        run
+        for run in store_module.list_runs()
+        if run.meta.get("config_id") == config
+        and run.meta.get("git_commit") == git
+        and run.meta.get("dataset_sha256") == sha
+        and run.meta.get("valid_for_quality") is not False
+        and run.meta.get("partial") is not True
+    ]
+    if len(candidates) < 2:
+        print(
+            f"未找到可用的重复 run，回退到 {DEFAULT_RECORDED_VARIANCE}",
+            file=sys.stderr,
+        )
+        return DEFAULT_RECORDED_VARIANCE
+    first, second = candidates[-2], candidates[-1]
+    first_mean = _mean_score(first)
+    second_mean = _mean_score(second)
+    if first_mean is None or second_mean is None:
+        print(
+            f"未找到可用的重复 run，回退到 {DEFAULT_RECORDED_VARIANCE}",
+            file=sys.stderr,
+        )
+        return DEFAULT_RECORDED_VARIANCE
+    value = abs(second_mean - first_mean)
+    print(
+        f"variance auto: {value:.4f}（{first.run_id} vs {second.run_id}）",
+        file=sys.stderr,
+    )
+    return value
+
+
+def _parse_variance(raw: str | None, baseline: Run, store_module: Any) -> float | None:
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if text == "auto":
+        return _auto_variance(baseline, store_module)
+    try:
+        return float(text)
+    except ValueError:
+        raise GateInputError(f"--variance 只接受数字或 auto，实际 {raw!r}") from None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -534,9 +682,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--variance",
-        type=float,
         default=None,
-        help=f"记录方差，默认读 baseline.meta 或 {DEFAULT_RECORDED_VARIANCE}",
+        help=(
+            f"记录方差：数字、auto 或留空（读 baseline.meta / {DEFAULT_RECORDED_VARIANCE}）；"
+            "auto=找同 config/同 commit/同数据集的两次 run，用均值差绝对值"
+        ),
     )
     parser.add_argument(
         "--allow-invalid-baseline",
@@ -583,10 +733,11 @@ def main(argv: list[str] | None = None) -> int:
             baseline = store.resolve_run_ref(args.baseline)
             candidate = store.resolve_run_ref(args.candidate)
 
+        variance_value = _parse_variance(args.variance, baseline, store)
         result = compare(
             baseline,
             candidate,
-            variance=args.variance,
+            variance=variance_value,
             allow_invalid_baseline=args.allow_invalid_baseline,
             allow_invalid_candidate=args.allow_invalid_candidate,
             allow_partial=args.allow_partial,
