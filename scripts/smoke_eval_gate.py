@@ -79,6 +79,7 @@ def _make_run(
     valid_for_quality: bool = True,
     case_ids: tuple[str, ...] = _CASE_IDS,
     git_commit: str = "fixture",
+    dataset_sha: str = "fixture-sha",
     partial: bool = False,
     dataset_size: int | None = None,
 ) -> Run:
@@ -111,7 +112,7 @@ def _make_run(
         "flags": {"ENABLE_TOOL_POLICY": "0"},
         "schema_sha256": "0" * 64,
         "dataset": "fixture",
-        "dataset_sha256": "fixture-sha",
+        "dataset_sha256": dataset_sha,
         "recorded_variance": gate.DEFAULT_RECORDED_VARIANCE,
         "environment": {
             "rag_ok": True,
@@ -310,6 +311,63 @@ def check_flip_evidence() -> str:
     return "PASS，flips=2/2/16，p=1.00，报告已呈现"
 
 
+def check_pass_attribution_wording() -> str:
+    base = _make_run(f"{_STAMP}-fixture-note-base", [9.0] * 20, case_ids=_TWENTY_IDS)
+    candidate = _make_run(f"{_STAMP}-fixture-note-down", [9.0] * 19 + [8.0], case_ids=_TWENTY_IDS)
+    result = gate.compare(base, candidate)
+    _assert(result.status == "PASS", f"净降 1 题应 PASS，实际 {result.status}")
+    _assert("变化归因" in result.reason, f"PASS 应写变化归因：{result.reason}")
+    _assert("失败归因" not in result.reason, f"PASS 不应写失败归因：{result.reason}")
+    text = report.write_markdown(candidate.run_id, result).read_text(encoding="utf-8")
+    _assert("变化归因" in text, "报告表头应写变化归因")
+    _assert("失败归因" not in text, "PASS 报告不应出现失败归因")
+    return "PASS reason/报告表头均为变化归因"
+
+
+def check_inband_wording() -> str:
+    base = _make_run(f"{_STAMP}-fixture-inband-base", [9.0] * 20, case_ids=_TWENTY_IDS)
+    candidate = _make_run(f"{_STAMP}-fixture-inband-up", [9.0] * 19 + [10.0], case_ids=_TWENTY_IDS)
+    result = gate.compare(base, candidate)
+    _assert(result.status == "PASS", f"净升 1 题应 PASS，实际 {result.status}")
+    _assert("差异在单题当量内" in result.reason, f"缺当量内措辞：{result.reason}")
+    return f"PASS，reason 含差异在单题当量内（{result.delta_in_cases:+.1f} 题）"
+
+
+def check_small_sample_warning() -> str:
+    case_ids = ("q001", "q002")
+    base = _make_run(f"{_STAMP}-fixture-n2-base", [9.0, 8.0], case_ids=case_ids, dataset_size=2)
+    candidate = _make_run(
+        f"{_STAMP}-fixture-n2-cand", [9.0, 8.0], case_ids=case_ids, dataset_size=2
+    )
+    result = gate.compare(base, candidate)
+    _assert(result.sample_warning is not None, "n=2 应有 sample_warning")
+    _assert("样本过小" in result.reason, f"reason 缺样本过小：{result.reason}")
+    text = report.write_markdown(candidate.run_id, result).read_text(encoding="utf-8")
+    _assert("样本过小" in text, "报告顶部缺样本过小警告")
+    return f"sample_warning={result.sample_warning}"
+
+
+def check_mixed_dataset() -> str:
+    base = _make_run(f"{_STAMP}-fixture-ds-base", [9.0, 8.0, 9.0])
+    candidate = _make_run(f"{_STAMP}-fixture-ds-other", [9.0, 8.0, 9.0], dataset_sha="other-sha")
+    try:
+        gate.compare(base, candidate)
+    except GateInputError as exc:
+        text = str(exc)
+        _assert("数据集不同" in text, f"错误应说明数据集不同：{text}")
+    else:
+        raise SmokeFailure("数据集不同默认应拒绝，实际通过了比较")
+    code, _ = _gate_exit(base, candidate)
+    _assert(code == 2, f"数据集不同默认退出码应为 2，实际 {code}")
+    result = gate.compare(base, candidate, allow_mixed_dataset=True)
+    _assert(result.dataset_mismatch is True, "放行后 dataset_mismatch 应为 True")
+    text = report.write_markdown(candidate.run_id, result).read_text(encoding="utf-8")
+    _assert("数据集不同" in text, "报告缺数据集不同提示")
+    code2, _ = _gate_exit(base, candidate, "--allow-mixed-dataset")
+    _assert(code2 == 0, f"加 --allow-mixed-dataset 后退出码应为 0，实际 {code2}")
+    return "数据集不同默认 exit 2；放行后 dataset_mismatch=true"
+
+
 def check_probe_failure() -> str:
     """把 RAG 指向不存在端口，断言 run.py 拒绝开跑、退出码 2。"""
     import evals.run as run_module
@@ -482,6 +540,10 @@ def main(argv: list[str] | None = None) -> int:
         ("净降 1 题（delta=-0.05, n=20）-> PASS", check_net_one_case_down),
         ("净降 3 题（delta=-0.15）-> FAIL_DEGRADED", check_net_three_case_down),
         ("2 升 2 降 -> PASS + 符号检验证据", check_flip_evidence),
+        ("PASS -> 变化归因（不写失败归因）", check_pass_attribution_wording),
+        ("delta 非零且在阈值内 -> 差异在单题当量内", check_inband_wording),
+        ("n=2 -> sample_warning 非空", check_small_sample_warning),
+        ("数据集不同 -> exit 2；放行后 dataset_mismatch", check_mixed_dataset),
         ("探活失败 -> 退出码 2", lambda: check_probe_failure()),
         ("边界：方差为 0 -> 阈值取单题当量", lambda: check_zero_variance(base)),
         ("边界：只有 1 题 -> 可读错误", lambda: check_single_case(base)),

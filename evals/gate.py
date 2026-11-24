@@ -112,6 +112,10 @@ class GateResult:
     baseline_git: str
     candidate_git: str
     quality_warning: str | None
+    sample_warning: str | None
+    dataset_mismatch: bool
+    baseline_dataset_sha: str
+    candidate_dataset_sha: str
     evidence: tuple[CaseEvidence, ...]
     failures: tuple[CaseEvidence, ...]
     attribution_counts: Mapping[str, int]
@@ -324,24 +328,51 @@ def _guard_partial(
 
 
 def _decide_status(
-    delta: float, threshold: float, *, code_version_changed: bool
+    delta: float,
+    threshold: float,
+    *,
+    delta_in_cases: float,
+    code_version_changed: bool,
 ) -> tuple[GateStatus, str]:
-    """三态 + 结论文案（零差值单独措辞；版本漂移时改为无法归因）。"""
+    """三态 + 随 delta 变化的措辞（版本漂移时改为无法归因）。"""
     epsilon = 1e-12
     if delta < -threshold - epsilon:
         status: GateStatus = "FAIL_DEGRADED"
-        conclusion = "退化超出记录噪声"
+        conclusion = "退化超出阈值"
     elif delta > threshold + epsilon:
         status = "WARN_IMPROVED"
-        conclusion = "提升超出记录噪声，需人工复核（可能是工具未触发/裁判漂移/答案变短）"
+        conclusion = "提升超出阈值，需人工复核"
     else:
         status = "PASS"
-        conclusion = "同口径无漂移"
+        conclusion = "差异在单题当量内，不显著"
     if abs(delta) < 1e-9:
         conclusion = "无差异（两均值完全相同）"
+    elif status == "PASS":
+        conclusion = f"差异在单题当量内（{abs(delta_in_cases):.1f} 题），不显著"
     if code_version_changed and status != "PASS":
         conclusion = "含代码版本差异，无法归因，需同版本复跑"
     return status, conclusion
+
+
+def _guard_dataset(
+    baseline: Run, candidate: Run, *, allow_mixed_dataset: bool
+) -> tuple[bool, str, str]:
+    """数据集 sha256 不同时默认拒绝；放行时返回 (mismatch, base_sha, cand_sha)。"""
+    baseline_sha = str(baseline.meta.get("dataset_sha256") or "")
+    candidate_sha = str(candidate.meta.get("dataset_sha256") or "")
+    mismatch = bool(baseline_sha and candidate_sha and baseline_sha != candidate_sha)
+    if mismatch and not allow_mixed_dataset:
+        raise GateInputError(
+            f"两次 run 数据集不同（{baseline_sha[:8]}… vs {candidate_sha[:8]}…），"
+            "不可直接比较；如确需对比加 --allow-mixed-dataset"
+        )
+    return mismatch, baseline_sha, candidate_sha
+
+
+def _sample_warning(n_cases: int, one_case_weight: float) -> str | None:
+    if n_cases < 5:
+        return f"样本过小（n={n_cases}），单题当量 {one_case_weight:.2f}，判据判别力弱"
+    return None
 
 
 def compare(
@@ -353,6 +384,7 @@ def compare(
     allow_invalid_baseline: bool = False,
     allow_invalid_candidate: bool = False,
     allow_partial: bool = False,
+    allow_mixed_dataset: bool = False,
 ) -> GateResult:
     """比较两个 run 的均值差是否落在记录方差内；纯函数，无 IO。
 
@@ -365,13 +397,14 @@ def compare(
         allow_invalid_baseline: 允许 `valid_for_quality=false` 的基线继续比较。
         allow_invalid_candidate: 允许无效候选继续比较。
         allow_partial: 题集不一致时允许只比共同题。
+        allow_mixed_dataset: 数据集 sha256 不同时允许继续比较。
 
     Returns:
         GateResult：三态结论 + 两均值、阈值、差值、逐题归因、有效性/题集/版本标记。
 
     Raises:
-        GateInputError: 输入不合法（无效 run 未放行 / 题集不一致未放行 /
-            缺字段 / 共同题 < 2 / 方差为负 / 步长非正）。
+        GateInputError: 输入不合法（无效 run 未放行 / 数据集不一致未放行 /
+            题集不一致未放行 / 缺字段 / 共同题 < 2 / 方差为负 / 步长非正）。
     """
     _validate_run(baseline, "baseline")
     _validate_run(candidate, "candidate")
@@ -380,6 +413,9 @@ def compare(
         candidate,
         allow_invalid_baseline=allow_invalid_baseline,
         allow_invalid_candidate=allow_invalid_candidate,
+    )
+    dataset_mismatch, baseline_dataset_sha, candidate_dataset_sha = _guard_dataset(
+        baseline, candidate, allow_mixed_dataset=allow_mixed_dataset
     )
 
     base_cases = _case_map(baseline)
@@ -459,9 +495,13 @@ def compare(
     one_case_weight = step / n_cases
     threshold_used = max(recorded_variance, one_case_weight)
     delta_in_cases = delta / one_case_weight
+    sample_warning = _sample_warning(n_cases, one_case_weight)
     sign_test_p = _sign_test_p(up, down)
     status, conclusion = _decide_status(
-        delta, threshold_used, code_version_changed=code_version_changed
+        delta,
+        threshold_used,
+        delta_in_cases=delta_in_cases,
+        code_version_changed=code_version_changed,
     )
     passed = status != "FAIL_DEGRADED"
 
@@ -473,12 +513,13 @@ def compare(
     comparison = (
         f"delta={delta:+.4f}（candidate-baseline；净值 {abs(delta_in_cases):.1f} 题当量）；"
         f"有效阈值 {threshold_used:.4f}（方差 {recorded_variance:.4f} 与单题当量 "
-        f"{one_case_weight:.4f} 取大）"
+        f"{one_case_weight:.4f}（score_step={step:g}, n={n_cases}）取大）"
     )
-    failure_note = ""
+    attribution_note = ""
     if failures:
         parts = [f"{label} {counts[label]}" for label in ATTRIBUTION_LABELS if counts.get(label)]
-        failure_note = f"；失败归因：{'、'.join(parts)}"
+        note_label = "失败归因" if status == "FAIL_DEGRADED" else "变化归因"
+        attribution_note = f"；{note_label}：{'、'.join(parts)}"
     partial_note = ""
     if partial_compare:
         partial_note = (
@@ -490,7 +531,11 @@ def compare(
         f"；逐题 {up} 升 / {down} 降 / {unchanged} 不变，"
         f"符号检验 p={sign_test_p:.2f}（{significance}）"
     )
-    reason = f"{status}：{comparison}，{conclusion}{partial_note}{failure_note}{flip_note}"
+    sample_note = f"；{sample_warning}" if sample_warning else ""
+    reason = (
+        f"{status}：{comparison}，{conclusion}"
+        f"{partial_note}{attribution_note}{flip_note}{sample_note}"
+    )
 
     return GateResult(
         status=status,
@@ -519,6 +564,10 @@ def compare(
         baseline_git=baseline_git,
         candidate_git=candidate_git,
         quality_warning=quality_warning,
+        sample_warning=sample_warning,
+        dataset_mismatch=dataset_mismatch,
+        baseline_dataset_sha=baseline_dataset_sha,
+        candidate_dataset_sha=candidate_dataset_sha,
         evidence=tuple(evidence),
         failures=failures,
         attribution_counts=counts,
@@ -557,6 +606,10 @@ def _print_result(result: GateResult, *, as_json: bool) -> None:
             "baseline_git": result.baseline_git,
             "candidate_git": result.candidate_git,
             "quality_warning": result.quality_warning,
+            "sample_warning": result.sample_warning,
+            "dataset_mismatch": result.dataset_mismatch,
+            "baseline_dataset_sha": result.baseline_dataset_sha,
+            "candidate_dataset_sha": result.candidate_dataset_sha,
             "criterion": result.criterion,
             "reason": result.reason,
             "attribution_counts": result.attribution_counts,
@@ -591,10 +644,18 @@ def _print_result(result: GateResult, *, as_json: bool) -> None:
         print(f"缺题     : 基线缺 {','.join(result.missing_in_baseline)}")
     if result.code_version_changed:
         print(f"代码版本 : {result.baseline_git} vs {result.candidate_git}（含版本差异）")
+    if result.dataset_mismatch:
+        print(
+            f"数据集   : {result.baseline_dataset_sha[:8]}… vs "
+            f"{result.candidate_dataset_sha[:8]}…（不同）"
+        )
+    if result.sample_warning:
+        print(f"样本警告 : {result.sample_warning}")
     print(f"判据     : {result.criterion}")
     print(
         f"阈值     : 有效 {result.threshold_used:.4f}"
-        f"（方差 {result.recorded_variance:.4f} 与单题当量 {result.one_case_weight:.4f} 取大）"
+        f"（方差 {result.recorded_variance:.4f} 与单题当量 "
+        f"{result.one_case_weight:.4f}（score_step={result.score_step:g}, n={result.n_cases}）取大）"
     )
     print(f"证据     : delta={result.delta:+.4f}（{result.delta_in_cases:+.1f} 题当量）")
     print(
@@ -703,6 +764,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="题集不一致时允许只比较共同题（结果标记 partial_compare/skipped）",
     )
+    parser.add_argument(
+        "--allow-mixed-dataset",
+        action="store_true",
+        help="数据集 sha256 不同时允许继续比较（结果标记 dataset_mismatch）",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON 供机器读")
     args = parser.parse_args(argv)
 
@@ -741,6 +807,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_invalid_baseline=args.allow_invalid_baseline,
             allow_invalid_candidate=args.allow_invalid_candidate,
             allow_partial=args.allow_partial,
+            allow_mixed_dataset=args.allow_mixed_dataset,
         )
     except (GateInputError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"输入不合法：{exc}", file=sys.stderr)

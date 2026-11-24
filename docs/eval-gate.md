@@ -37,7 +37,7 @@ CI 没有模型凭据，**不跑 `evals/run.py`**；`.github/workflows/eval-gate
   `p=2*sum_{i<=min(up,down)} C(n,i)/2^n`；p 文本用于判断“变化是否像随机抖动”，
   不改变三态结论；
 - 三态含义：
-  - `PASS`：变化在有效阈值内，同口径无漂移；
+  - `PASS`：变化在有效阈值内；措辞随 delta 变化（见下）；
   - `WARN_IMPROVED`：提升超出有效阈值，**不直接放行**，需人工复核（可能是工具未触发 /
     裁判漂移 / 答案变短），CLI 退出码 0 但报告保留 WARN；
   - `FAIL_DEGRADED`：退化超出有效阈值，CLI 退出码 1；
@@ -51,6 +51,23 @@ CI 没有模型凭据，**不跑 `evals/run.py`**；`.github/workflows/eval-gate
   但报告顶部提示“分数差异不能归因于配置开关”，且 |delta| 超方差时 reason 改为
   “含代码版本差异，无法归因，需同版本复跑”；
 - 少于 2 道共同有效题、方差为负、步长非正、per_case 缺字段都直接给可读错误（退出码 2），不猜。
+
+### 2.1 措辞口径
+
+- **归因标签**：`FAIL_DEGRADED` 写「失败归因：…」；`PASS` / `WARN_IMPROVED` 写
+  「变化归因：…」——PASS 时逐题下降只是变化，不叫失败；报告第 3/5 节的表头同步切换；
+- **delta 措辞**：
+  - `delta == 0` -> “无差异（两均值完全相同）”；
+  - `0 < |delta| <= 有效阈值` -> “差异在单题当量内（{delta_in_cases:.1f} 题），不显著”；
+  - 超出阈值且为正 -> “提升超出阈值，需人工复核”；
+  - 超出阈值且为负 -> “退化超出阈值”；
+- **步长留痕**：reason 的当量处写 `单题当量 0.0500（score_step=1, n=20）`；
+- **样本过小**：`n_cases < 5` 时 `sample_warning` 非空，reason 末尾追加
+  “样本过小（n=N），单题当量 W，判据判别力弱”；状态仍按三态，不阻断，报告顶部提示；
+- **数据集不一致**：两次 run 的 `dataset_sha256` 不同默认退出 2，
+  提示“两次 run 数据集不同（a… vs b…），不可直接比较”；
+  `--allow-mixed-dataset` 才继续，结果 `dataset_mismatch=true`，报告单独一行提示
+  （与 `--allow-partial` 独立，可同时出现）。
 
 ## 3. 怎么跑
 
@@ -82,7 +99,7 @@ python -m evals.gate --compare last
 python -m evals.gate --baseline <run> --candidate <run> --variance auto
 # 明确放行无效 run / 题集不一致（结果会带 quality_warning / compared_cases / skipped）
 python -m evals.gate --baseline <run> --candidate <run> \
-  --allow-invalid-baseline --allow-invalid-candidate --allow-partial
+  --allow-invalid-baseline --allow-invalid-candidate --allow-partial --allow-mixed-dataset
 
 # 5) 离线冒烟（不调模型，CI 同款）
 python scripts/smoke_eval_gate.py
@@ -130,7 +147,9 @@ python -m evals.backfill \
 - `score_step` 默认 1.0；整数 1~10 分 judge 推出来就是 1.0，换 0~1 指标时建议显式传步长；
 - `latency_ms` / `tokens` 来自现有 SSE；`tokens` 在会话端点没有 kpi 帧时为 `null`，
   报告不据此判定；
-- 门禁只比较**共同有效题**：某题候选失败（无分数）不计入均值，但会在失败清单里归因；
+- 门禁只比较**共同有效题**：某题候选失败（无分数）不计入均值，但会在变化/失败清单里归因；
+- `n_cases < 5` 的 run 会有 `sample_warning`，但**不阻断**；样本过小的结论只能作链路参考；
+- `dataset_sha256` 不同默认拒绝；`--allow-mixed-dataset` 只用于诊断，结论不可跨数据集比较；
 - **非全量 run**（`--limit N < dataset_size`）分数不可用于发布或写简历：
   meta 标 `partial=true / publishable=false`，报告顶部有醒目提示；
 - **代码版本不同**的两次 run 不做配置归因：报告顶部提示，`|delta|` 超方差时 reason

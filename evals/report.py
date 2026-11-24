@@ -190,6 +190,14 @@ def _matrix_section(candidate: Run, result: GateResult | None = None) -> list[st
     return lines
 
 
+def _attribution_label(result: GateResult) -> str:
+    return "失败归因" if result.status == "FAIL_DEGRADED" else "变化归因"
+
+
+def _attribution_kind(result: GateResult) -> str:
+    return "失败" if result.status == "FAIL_DEGRADED" else "变化"
+
+
 def _diff_section(result: GateResult | None) -> list[str]:
     lines = ["## 3. 与上一次 run 的 diff", ""]
     if result is None:
@@ -205,9 +213,10 @@ def _diff_section(result: GateResult | None) -> list[str]:
         lines.append(f"- 候选缺题：{', '.join(result.missing_in_candidate)}")
     if result.missing_in_baseline:
         lines.append(f"- 基线缺题：{', '.join(result.missing_in_baseline)}")
+    label = _attribution_label(result)
     lines += [
         "",
-        "| case | base | cand | diff | 归因 |",
+        f"| case | base | cand | diff | {label} |",
         "|---|---|---|---|---|",
     ]
     for item in result.evidence:
@@ -232,14 +241,18 @@ def _conclusion_section(result: GateResult | None) -> list[str]:
 
 
 def _failures_section(result: GateResult | None) -> list[str]:
-    lines = ["## 5. 失败 case 清单（退化 / 报错 / 超时）", ""]
-    if result is None or not result.failures:
-        lines.append("无退化、报错或超时的 case。")
+    if result is None:
+        return ["## 5. 失败 / 变化 case 清单（退化 / 报错 / 超时）", "", "无对比结果。"]
+    label = _attribution_label(result)
+    kind = _attribution_kind(result)
+    lines = [f"## 5. {label} case 清单（退化 / 报错 / 超时）", ""]
+    if not result.failures:
+        lines.append(f"无{kind}、报错或超时的 case。")
         return lines
 
     shown = result.failures[:10]
     lines += [
-        "| case | base | cand | diff | 归因 | 详情 |",
+        f"| case | base | cand | diff | {label} | 详情 |",
         "|---|---|---|---|---|---|",
     ]
     for item in shown:
@@ -251,8 +264,41 @@ def _failures_section(result: GateResult | None) -> list[str]:
     hidden = len(result.failures) - len(shown)
     if hidden:
         lines.append("")
-        lines.append(f"另有 {hidden} 条失败未列出（报告最多列 10 条）。")
+        lines.append(f"另有 {hidden} 条{kind}未列出（报告最多列 10 条）。")
     return lines
+
+
+def _report_warnings(run: Run, result: GateResult | None) -> list[str]:
+    warnings: list[str] = []
+    if run.meta.get("valid_for_quality") is False:
+        warnings.append("本次为链路验证 run，环境未就绪，分数不可用于质量结论")
+    if _is_partial(run.meta):
+        warnings.append(
+            f"非全量 run（n_cases={run.meta.get('n_cases')} / "
+            f"dataset_size={run.meta.get('dataset_size')}），结论不可用于发布或写简历"
+        )
+    if result is None:
+        return warnings
+    if result.quality_warning:
+        warnings.append(result.quality_warning)
+    if result.code_version_changed:
+        warnings.append(
+            f"两次 run 代码版本不同（{result.baseline_git} vs {result.candidate_git}），"
+            "分数差异不能归因于配置开关"
+        )
+    if result.partial_compare:
+        warnings.append(
+            f"仅比较共同题（compared_cases={result.compared_cases} / "
+            f"skipped={result.skipped}），结论不可跨版本比较"
+        )
+    if result.dataset_mismatch:
+        warnings.append(
+            f"两次 run 数据集不同（{result.baseline_dataset_sha[:8]}… vs "
+            f"{result.candidate_dataset_sha[:8]}…），不可直接比较"
+        )
+    if result.sample_warning:
+        warnings.append(result.sample_warning)
+    return warnings
 
 
 def write_markdown(run_id: str, compare_result: GateResult | None) -> Path:
@@ -278,28 +324,7 @@ def write_markdown(run_id: str, compare_result: GateResult | None) -> Path:
         f"# 评测报告 — {run_id}",
         "",
     ]
-    warnings: list[str] = []
-    if run.meta.get("valid_for_quality") is False:
-        warnings.append("本次为链路验证 run，环境未就绪，分数不可用于质量结论")
-    if _is_partial(run.meta):
-        warnings.append(
-            f"非全量 run（n_cases={run.meta.get('n_cases')} / "
-            f"dataset_size={run.meta.get('dataset_size')}），结论不可用于发布或写简历"
-        )
-    if compare_result is not None:
-        if compare_result.quality_warning:
-            warnings.append(compare_result.quality_warning)
-        if compare_result.code_version_changed:
-            warnings.append(
-                f"两次 run 代码版本不同（{compare_result.baseline_git} vs "
-                f"{compare_result.candidate_git}），分数差异不能归因于配置开关"
-            )
-        if compare_result.partial_compare:
-            warnings.append(
-                f"仅比较共同题（compared_cases={compare_result.compared_cases} / "
-                f"skipped={compare_result.skipped}），结论不可跨版本比较"
-            )
-    for warning in warnings:
+    for warning in _report_warnings(run, compare_result):
         lines += [f"> ⚠️ {warning}", ""]
     lines += [
         f"> 配置 {run.meta.get('config_id')} / 数据集 {run.meta.get('dataset')}；"
